@@ -28,7 +28,7 @@ export async function speechToText(audioBuffer: Buffer, format = 'wav'): Promise
     const config = loadConfig()
     const port = config.gateway?.port || 18789
 
-    const blob = new Blob([audioBuffer], { type: `audio/${format}` })
+    const blob = new Blob([new Uint8Array(audioBuffer)], { type: `audio/${format}` })
     const form = new FormData()
     form.append('file', blob, `audio.${format}`)
     form.append('model', 'whisper-1')

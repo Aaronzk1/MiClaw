@@ -75,9 +75,9 @@ export async function executeWorkflow(workflowId: string, input: string): Promis
         break
       }
       case 'condition': {
-        const keywords = currentNode.config.keywords || []
-        const matched = keywords.some((k: string) => currentOutput.includes(k))
-        const nextId = matched ? currentNode.next[0] : currentNode.next[1]
+        const keywords: string[] = currentNode.config.keywords || []
+        const matched: boolean = keywords.some((k: string) => currentOutput.includes(k))
+        const nextId: string = matched ? currentNode.next[0] : currentNode.next[1]
         currentNode = wf.nodes.find(n => n.id === nextId)
         steps.push({ nodeId: currentNode?.id || 'end', type: 'condition', input: currentOutput, output: `branch: ${matched}`, duration: Date.now() - start })
         continue

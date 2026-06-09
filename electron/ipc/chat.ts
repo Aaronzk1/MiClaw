@@ -13,7 +13,7 @@ export function setupChatIPC() {
   ipcMain.handle('gc:members', (_, gid) => {
     const group = kvGet('groups', gid); if (!group) return []
     const agents = kvList('agents')
-    return (group.members || []).map((aid: string) => agents.find((a: any) => a.id === aid) || { agentId: aid, name: aid, icon: 'AI' })
+    return (group.members || []).map((aid: string) => agents.find((a: any) => a.id === aid) || ({ agentId: aid, name: aid, icon: 'AI' } as any))
   })
   ipcMain.handle('gc:addMember', (_, gid, aid) => {
     const group = kvGet('groups', gid)
@@ -40,11 +40,11 @@ export function setupChatIPC() {
     const gcHistory = gcMsgList(gid)
     const agentMsgCount: Record<string, number> = {}
     for (const a of groupAgents) agentMsgCount[a.id] = 0
-    for (const m of gcHistory) { if (agentMsgCount[m.senderId] !== undefined) agentMsgCount[m.senderId]++ }
+    for (const m of gcHistory as any[]) { if (agentMsgCount[m.senderId] !== undefined) agentMsgCount[m.senderId]++ }
     const selectedAgent = groupAgents.reduce((min: any, a: any) =>
       (agentMsgCount[a.id] || 0) < (agentMsgCount[min.id] || 0) ? a : min
     )
-    const recentHistory = gcHistory.slice(-10)
+    const recentHistory = gcHistory.slice(-10) as any[]
     const msgs = [{ role: 'system', content: (selectedAgent.systemPrompt || '') + '\n\nYou are in a group chat. Other members may reply after you.' }]
     for (const m of recentHistory) msgs.push({ role: (m as any).role === 'user' ? 'user' : 'assistant', content: (m as any).content })
     const config = loadConfig(); const port = config.gateway?.port || 18789

@@ -26,9 +26,9 @@ export function analyzeIntent(message: string, context?: any): IntentAnalysis {
   const intentRules = [
     { kw: ['write code','implement','create a','\u5199\u4ee3\u7801','\u5b9e\u73b0','\u7f16\u5199','\u5f00\u53d1','debug','\u8c03\u8bd5','refactor','\u91cd\u6784'], agent: 'coder', intent: 'code' },
     { kw: ['analyze','data','csv','excel','\u5206\u6790\u6570\u6360','\u7edf\u8ba1'], agent: 'analyst', intent: 'analyze' },
+    { kw: ['research','\u8c03\u7814','\u8bba\u6587','report','\u7814\u7a76','study','paper'], agent: 'researcher', intent: 'research' },
     { kw: ['search','\u641c\u7d22','\u67e5\u627e','\u67e5\u4e00\u4e0b','find','look up'], agent: 'default', intent: 'search' },
     { kw: ['write article','\u5199\u6587\u7ae0','\u6587\u6848','\u5199\u4f5c','\u5c0f\u8bf4','blog','copywriting'], agent: 'writer', intent: 'write' },
-    { kw: ['research','\u8c03\u7814','\u8bba\u6587','report','\u7814\u7a76','study','paper'], agent: 'researcher', intent: 'research' },
   ]
 
   let bestMatch = { intent: 'chat', confidence: 0.2, agentId: 'default' }
