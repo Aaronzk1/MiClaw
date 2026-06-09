@@ -85,6 +85,9 @@ export function restoreBackup(backupPath: string): boolean {
     createBackup()
     const { closeDB } = require('./db')
     closeDB()
+    // After restore, DB is closed. App MUST be restarted.
+    // Set a flag so the app can show a restart prompt.
+    logger.warn('Backup', 'DB restored. App must be restarted.')
     copyFileSync(backupPath, dbPath)
     logger.info('Backup', `Restored from: ${backupPath}`)
     return true

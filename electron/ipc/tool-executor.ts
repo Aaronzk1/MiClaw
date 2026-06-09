@@ -1,5 +1,5 @@
 ﻿import { exec } from 'child_process'
-import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'fs'
+import { readFileSync, writeFileSync, existsSync, mkdirSync, unlinkSync } from 'fs'
 import { join } from 'path'
 import { app } from 'electron'
 import { logger } from './logger'
@@ -51,11 +51,15 @@ async function toolCodeExecute(args: { language: string; code: string }): Promis
 
   if (language === 'python') {
     writeFileSync(scriptFile + '.py', code, 'utf8')
-    return execPromise(`python "${scriptFile}.py"`, 30000)
+    const result = await execPromise(`python "${scriptFile}.py"`, 30000)
+    try { unlinkSync(scriptFile + '.py') } catch {}
+    return result
   }
   if (language === 'javascript') {
     writeFileSync(scriptFile + '.js', code, 'utf8')
-    return execPromise(`node "${scriptFile}.js"`, 30000)
+    const result = await execPromise(`node "${scriptFile}.js"`, 30000)
+    try { unlinkSync(scriptFile + '.js') } catch {}
+    return result
   }
   if (language === 'shell') {
     return execPromise(code, 30000)

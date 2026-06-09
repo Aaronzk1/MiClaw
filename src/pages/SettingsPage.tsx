@@ -26,6 +26,8 @@ export function SettingsPage() {
   }
 
   const applyTheme = (theme: string) => {
+    update('theme', theme)
+    api.saveConfig({ ...config, theme }).catch(() => {})
     const root = document.documentElement
     if (theme === 'dark') root.setAttribute('data-theme', 'dark')
     else if (theme === 'light') root.setAttribute('data-theme', 'light')

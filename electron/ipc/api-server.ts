@@ -3,6 +3,16 @@ import { logger } from './logger'
 import { kvList, kvUpsert, kvGet } from '../storage/db'
 import { loadConfig } from './core'
 
+// Basic rate limiter
+const requestCounts = new Map<string, { count: number; resetAt: number }>()
+function checkRateLimit(ip: string, maxPerMinute = 60): boolean {
+  const now = Date.now()
+  const entry = requestCounts.get(ip)
+  if (!entry || now > entry.resetAt) { requestCounts.set(ip, { count: 1, resetAt: now + 60000 }); return true }
+  entry.count++
+  return entry.count <= maxPerMinute
+}
+
 let apiServer: ReturnType<typeof createServer> | null = null
 
 interface ApiServerConfig {
@@ -16,6 +26,8 @@ export function startApiServer(config: ApiServerConfig) {
 
   apiServer = createServer(async (req: IncomingMessage, res: ServerResponse) => {
     res.setHeader('Access-Control-Allow-Origin', '*')
+    const clientIp = req.socket.remoteAddress || 'unknown'
+    if (!checkRateLimit(clientIp)) { res.writeHead(429, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ error: 'Rate limit exceeded' })); return }
     res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS')
     res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization')
     if (req.method === 'OPTIONS') { res.writeHead(204); res.end(); return }

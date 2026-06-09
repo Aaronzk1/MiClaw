@@ -9,7 +9,7 @@ interface GatewayConfig {
 
 const defaultConfig: GatewayConfig = {
   baseUrl: 'http://127.0.0.1:18789',
-  timeout: 60000,
+  timeout: 30000,
   maxRetries: 2,
   retryDelay: 1000,
 }

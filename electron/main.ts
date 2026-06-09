@@ -125,6 +125,7 @@ function matchesCron(schedule: string, now: Date): boolean {
 }
 
 const lastRunMap = new Map<string, number>()
+export function cleanupCronRun(jobId: string) { lastRunMap.delete(jobId) }
 
 function startCronScheduler() {
   setInterval(() => {

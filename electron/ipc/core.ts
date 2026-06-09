@@ -107,23 +107,6 @@ export function setupCoreIPC() {
   // ─── Crypto ───
   ipcMain.handle('crypto:encrypt', (_, text: string) => encryptSecret(text))
   ipcMain.handle('crypto:decrypt', (_, encoded: string) => decryptSecret(encoded))
-
-  // ─── Logs ───
-  ipcMain.handle('logs:list', () => {
-    const { readdirSync, mkdirSync } = require('fs')
-    const logDir = logger.getLogDir()
-    mkdirSync(logDir, { recursive: true })
-    return readdirSync(logDir).filter((f: string) => f.endsWith('.log')).sort().reverse()
-  })
-  ipcMain.handle('logs:read', (_, filename: string) => {
-    const { existsSync, readFileSync } = require('fs')
-    const path = require('path').join(logger.getLogDir(), filename)
-    if (!existsSync(path)) return ''
-    const content = readFileSync(path, 'utf8')
-    const lines = content.split('\n')
-    return lines.slice(-2000).join('\n')
-  })
-  ipcMain.handle('logs:dir', () => logger.getLogDir())
 }
 
 import { randomUUID } from 'crypto'

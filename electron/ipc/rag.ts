@@ -1,7 +1,7 @@
 ﻿import { readFileSync } from 'fs'
 import { extname } from 'path'
 import { logger } from './logger'
-import { kvList, kvUpsert, kvDelete } from '../storage/db'
+import { kvList, kvUpsert, kvDelete, getDB } from '../storage/db'
 import { loadConfig } from './core'
 
 export interface RagDocument {
@@ -68,9 +68,9 @@ async function generateChunkEmbeddings(docId: string, chunks: string[]) {
       if (data.data) {
         for (let j = 0; j < data.data.length; j++) {
           const chunkIdx = i + j
-          kvUpsert('embeddings', `${docId}-chunk-${chunkIdx}`, {
-            docId, chunkIdx, text: batch[j], embedding: data.data[j].embedding,
-          })
+          getDB().prepare('INSERT OR REPLACE INTO rag_chunks (id, doc_id, chunk_idx, content, embedding) VALUES (?, ?, ?, ?, ?)').run(
+            `${docId}-chunk-${chunkIdx}`, docId, chunkIdx, batch[j], JSON.stringify(data.data[j].embedding)
+          )
         }
       }
     }
@@ -89,7 +89,8 @@ function cosineSimilarity(a: number[], b: number[]): number {
 }
 
 export async function searchDocuments(query: string, topK = 5): Promise<Array<{ text: string; score: number; docId: string }>> {
-  const embeddings = kvList('embeddings') as any[]
+  const embeddings = getDB().prepare('SELECT doc_id as docId, chunk_idx as chunkIdx, content as text, embedding FROM rag_chunks').all() as any[]
+    for (const e of embeddings) { if (typeof e.embedding === 'string') e.embedding = JSON.parse(e.embedding) }
   if (embeddings.length === 0) return keywordSearch(query, topK)
 
   try {
@@ -136,10 +137,7 @@ export function listDocuments() {
 
 export function deleteDocument(docId: string) {
   kvDelete('documents', docId)
-  const embeddings = kvList('embeddings') as any[]
-  for (const e of embeddings.filter(e => e.docId === docId)) {
-    kvDelete('embeddings', `${e.docId}-chunk-${e.chunkIdx}`)
-  }
+  getDB().prepare('DELETE FROM rag_chunks WHERE doc_id = ?').run(docId)
 }
 
 export async function injectRAGContext(messages: any[], userMessage: string): Promise<number> {

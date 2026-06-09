@@ -54,6 +54,7 @@ export function ChatPage() {
   const [memoryInput, setMemoryInput] = useState('')
   const [playingTts, setPlayingTts] = useState<string | null>(null)
   const mediaRecorderRef = useRef<MediaRecorder | null>(null)
+  const streamBufRef = useRef('')
 
   useEffect(() => {
     api.getConfig().then(setConfig).catch(console.error)
@@ -79,14 +80,16 @@ export function ChatPage() {
   useEffect(() => { msgEndRef.current?.scrollIntoView({ behavior: 'smooth' }) }, [messages, streamBuf])
 
   useEffect(() => {
-    api.onChatToken((t: string) => appendToken(t))
+    api.onChatToken((t: string) => { appendToken(t); streamBufRef.current += t })
     api.onChatThinking((t: string) => appendThink(t))
     api.onChatToolCall((d: any) => addToolCall(d))
     api.onChatDone(() => {
-      if (streamBuf) addMessage({ role: 'assistant', content: streamBuf, timestamp: new Date().toISOString() })
+      const buf = streamBufRef.current
+      streamBufRef.current = ''
+      if (buf) addMessage({ role: 'assistant', content: streamBuf, timestamp: new Date().toISOString() })
       setStreaming(false)
-      if (currentConvId && messages.length <= 2 && streamBuf) {
-        const title = streamBuf.slice(0, 50).replace(/[\n\r]/g, ' ').trim()
+      if (currentConvId && messages.length <= 2 && buf) {
+        const title = buf.slice(0, 50).replace(/[\n\r]/g, ' ').trim()
         if (title) {
           const convs = useAppStore.getState().conversations
           const conv = convs.find((c: any) => c.id === currentConvId)
@@ -98,7 +101,7 @@ export function ChatPage() {
       }
     })
     api.onChatError(() => setStreaming(false))
-  }, [streamBuf])
+  }, [])
 
   // Drag and drop
   useEffect(() => {
