@@ -1,0 +1,13 @@
+﻿node_modules/
+dist/
+dist-electron/
+release/
+*.db
+*.db-wal
+*.db-shm
+backups/
+logs/
+sandbox/
+crash.log
+.env
+*.log
