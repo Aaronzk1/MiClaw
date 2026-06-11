@@ -536,7 +536,29 @@ export function getProactiveSuggestions(): string[] {
     suggestions.push('您通常在这个时间段进行调研，需要我帮您整理今天的调研笔记吗？')
   }
 
-  return suggestions.slice(0, 2) // Max 2 suggestions
+  // P2-6: Enhanced suggestions from task experience and user preferences
+  try {
+    const allMemories = kvList('memory')
+    // Suggest based on recent task experience
+    const recentExps = allMemories.filter((m: any) => m.category === 'task_experience').slice(-5)
+    if (recentExps.length >= 2) {
+      const toolFreq: Record<string, number> = {}
+      for (const exp of recentExps) {
+        const match = (exp.content || '').match(/Tools: ([^|]+)/)
+        if (match) {
+          for (const t of match[1].split('→').map((s: string) => s.trim())) {
+            if (t) toolFreq[t] = (toolFreq[t] || 0) + 1
+          }
+        }
+      }
+      const topTool = Object.entries(toolFreq).sort((a, b) => b[1] - a[1])[0]
+      if (topTool && topTool[1] >= 3 && suggestions.length < 3) {
+        suggestions.push(`您最近频繁使用 ${topTool[0]}，需要我帮您优化相关工作流吗？`)
+      }
+    }
+  } catch {}
+
+  return suggestions.slice(0, 3) // Max 3 suggestions
 }
 
 function getTopCategory(actions: Array<{ category: string }>): string {

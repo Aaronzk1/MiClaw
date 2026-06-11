@@ -2,9 +2,9 @@
 
 export interface Conversation { id: string; title: string; model: string; createdAt: string; updatedAt: string; parentConvId?: string; forkPoint?: number }
 export interface Message { role: string; content: string; timestamp?: string; tokens?: number; pinned?: boolean }
-export interface Agent { id: string; name: string; model?: string; systemPrompt?: string; color?: string; enabled?: boolean; skills?: string[] }
+export interface Agent { id: string; name: string; model?: string; systemPrompt?: string; identity?: string; expertise?: string; description?: string; color?: string; enabled?: boolean; skills?: string[]; mcpServers?: string[]; temperature?: number; maxTokens?: number }
 export interface Provider { id: string; name: string; baseUrl?: string; apiKey?: string; models?: any[]; enabled?: boolean }
-export interface Model { id: string; name: string; provider?: string; contextWindow?: number; maxTokens?: number; temperature?: number; enabled?: boolean }
+export interface Model { id: string; name: string; provider?: string; baseUrl?: string; apiId?: string; contextWindow?: number; maxTokens?: number; temperature?: number; enabled?: boolean }
 export interface Skill { id: string; name: string; description?: string; category?: string; source?: string; enabled?: boolean }
 export interface Memory { id: string; content: string; category?: string; importance?: number; createdAt?: string; source?: string }
 export interface CronJob { id: string; name?: string; command?: string; schedule?: string; enabled?: boolean }
@@ -33,7 +33,7 @@ export interface AaronClawAPI {
   getConfig(): Promise<Config>
   saveConfig(c: Config): Promise<boolean>
   convList(): Promise<Conversation[]>
-  convCreate(title: string, model?: string): Promise<string>
+  convCreate(title: string, model?: string, agentId?: string): Promise<string>
   convDelete(id: string): Promise<void>
   convMessages(cid: string): Promise<Message[]>
   convSave(cid: string, role: string, content: string): Promise<void>
@@ -47,8 +47,11 @@ export interface AaronClawAPI {
   providersDelete(id: string): Promise<void>
   modelsList(): Promise<Model[]>
   modelsSave(m: Model): Promise<void>
+  modelsDelete(id: string): Promise<void>
   modelsToggle(id: string, enabled: boolean): Promise<void>
   skillsList(): Promise<Skill[]>
+  skillsSave(item: any): Promise<void>
+  skillsDelete(id: string): Promise<void>
   skillsToggle(id: string, enabled: boolean): Promise<void>
   memoryList(): Promise<Memory[]>
   memorySearch(q: string): Promise<Memory[]>
@@ -60,26 +63,38 @@ export interface AaronClawAPI {
   cronHistory(jobId?: string): Promise<CronExecutionRecord[]>
   mcpList(): Promise<McpServer[]>
   mcpSave(s: McpServer): Promise<void>
+  mcpConnect(id: string): Promise<{ ok: boolean; tools?: any[]; error?: string }>
+  mcpDisconnect(id: string): Promise<void>
+  mcpCallTool(serverId: string, toolName: string, args: any): Promise<{ ok: boolean; result?: any; error?: string }>
+  mcpTools(): Promise<any[]>
+  mcpStatus(id: string): Promise<{ connected: boolean; tools: number }>
   gcGroups(): Promise<Group[]>
   gcMessages(gid: string): Promise<GcMessage[]>
-  gcSend(gid: string, msg: string): Promise<{ ok: boolean; reply?: string; agentId?: string; agentName?: string; error?: string }>
+  gcSend(gid: string, msg: string): Promise<{ ok: boolean; replies?: Array<{ agentId: string; agentName: string; reply?: string; error?: string }>; error?: string }>
   gcMembers(gid: string): Promise<Agent[]>
   gcAddMember(gid: string, aid: string): Promise<void>
   gcSave(group: any): Promise<void>
   gcBookmark(id: string): Promise<void>
   gcUnbookmark(id: string): Promise<void>
   gcBookmarks(gid: string): Promise<any[]>
+  gcDelete(id: string): Promise<void>
   gcPin(id: string): Promise<void>
   gcPinned(gid: string): Promise<any[]>
   gatewayStatus(): Promise<GatewayStatus>
   gatewayStart(): Promise<{ ok: boolean; error?: string }>
   gatewayCircuit(): Promise<CircuitStatus>
-  chatSend(opts: { message: string; history?: any[]; systemPrompt?: string; model?: string; convId?: string }): Promise<{ ok: boolean; text?: string; error?: string }>
+  chatSend(opts: { message: string; history?: any[]; systemPrompt?: string; model?: string; agentId?: string; convId?: string }): Promise<{ ok: boolean; text?: string; error?: string }>
   chatCancel(): Promise<boolean>
+  chatFeedback?(opts: { type: 'regenerate' | 'fork' | 'good'; convId?: string }): Promise<{ ok: boolean }>
+  chatDispatch(opts: { message: string; convId?: string }): Promise<{ ok: boolean; mode?: string; text?: string; subTasks?: any[]; error?: string }>
+  onDispatchStart(cb: (d: any) => void): void
+  onDispatchProgress(cb: (d: any) => void): void
+  onDispatchDone(cb: (d: any) => void): void
   onChatToken(cb: (t: string) => void): void
   onChatThinking(cb: (t: string) => void): void
   onChatToolCall(cb: (d: any) => void): void
-  onChatDone(cb: (t: string) => void): void
+  onChatStage(cb: (stage: string) => void): void
+  onChatDone(cb: (t: string, thinking?: string, toolCalls?: any[]) => void): void
   onChatError(cb: (e: string) => void): void
   onGcToken(cb: (t: string) => void): void
   onGcDone(cb: (t: string) => void): void
@@ -102,10 +117,6 @@ export interface AaronClawAPI {
   capDocExtract(filePath: string): Promise<{ ok: boolean; content?: string; filename?: string; error?: string }>
   capWebSearch(query: string): Promise<{ ok: boolean; results?: string; error?: string }>
   capEmbed(text: string): Promise<{ ok: boolean; embedding?: number[]; error?: string }>
-  capInsights(days?: number): Promise<{ ok: boolean; data?: string; error?: string }>
-  capDoctor(): Promise<{ ok: boolean; data?: string; error?: string }>
-  capSessions(query?: string): Promise<{ ok: boolean; data?: string; error?: string }>
-  capKanban(action: string, args?: string): Promise<{ ok: boolean; data?: string; error?: string }>
   capPlayAudio(path: string): Promise<{ ok: boolean }>
   onAudioReady(cb: (path: string) => void): void
   // Voice
@@ -113,7 +124,7 @@ export interface AaronClawAPI {
   voiceChunk(chunk: string): Promise<{ ok: boolean }>
   voiceStop(): Promise<{ ok: boolean; text?: string; error?: string }>
   // RAG
-  ragImport(filePath: string): Promise<{ ok: boolean; docId?: string; error?: string }>
+  ragImport(filePath: string): Promise<{ ok: boolean; id?: string; error?: string }>
   ragList(): Promise<RagDocument[]>
   ragDelete(docId: string): Promise<void>
   ragSearch(query: string, topK?: number): Promise<RagSearchResult[]>
@@ -121,7 +132,7 @@ export interface AaronClawAPI {
   wfList(): Promise<Workflow[]>
   wfSave(wf: Workflow): Promise<void>
   wfDelete(id: string): Promise<void>
-  wfExecute(id: string, input: string): Promise<WorkflowResult>
+  wfExecute(id: string, input?: string): Promise<WorkflowResult>
   wfPresets(): Promise<Workflow[]>
   // Backup
   backupCreate(): Promise<BackupMeta | null>
@@ -134,9 +145,18 @@ export interface AaronClawAPI {
   // Search
   searchMessages(query: string, limit?: number): Promise<Array<{ convId: string; role: string; content: string; timestamp: string; convTitle: string }>>
   // Logs
-  logsList(): Promise<string[]>
+  logsList(): Promise<Array<{ name: string; path: string; size: number }>>
   logsRead(filename: string): Promise<string>
   logsDir(): Promise<string>
-  // Generic invoke
-  invoke(channel: string, ...args: any[]): Promise<any>
+  // Self-evolution
+  patternsTop(limit?: number): Promise<Array<{ signature: string; count: number }>>
+  toolsStats(): Promise<Record<string, { calls: number; errors: number; successRate: number; qualitySum: number; qualityCount: number }>>
+  toolsReliable(): Promise<string[]>
+  toolsUnreliable(): Promise<string[]>
+  toolsHealth(): Promise<Record<string, { status: string; detail?: string }>>
+  skillsValidate(id: string): Promise<{ ok: boolean; issues?: string[] }>
+  // Generated files
+  generatedFilesList(): Promise<Array<{ id?: string; path: string; name: string; size: number; tool?: string; createdAt?: string }>>
+  generatedFilesDelete(id: string): Promise<void>
+  generatedFilesClear(): Promise<void>
 }

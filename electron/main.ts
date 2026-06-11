@@ -5,6 +5,8 @@ import { homedir, tmpdir } from 'os'
 import { exec, execFile } from 'child_process'
 import { executeTool, killAllProcesses, isPathAllowed, recordToolCall, validateToolParams, checkOutputQuality, loadToolStats, compressToolResult, getReliableTools, getUnreliableTools, getToolStats, computeResultQuality } from './ipc/tool-executor'
 import { buildSystemPrompt, BASE_PROMPT, detectMultiStepTask, extractSteps, startTaskTracking, getTaskProgressHint, clearTaskTracking } from './ipc/orchestrator'
+import { initSkillEngine, matchSkills, buildSkillInjection } from './ipc/skill-engine'
+import './ipc/builtin-skills'
 import { cacheAgents, cacheMemory, cacheProviders, cacheModels, cacheSkills, cacheRag, cacheConfig, invalidate } from './ipc/chat-cache'
 import { ToolCallRepair, CircuitBreaker } from './ipc/tool-repair'
 
@@ -732,7 +734,10 @@ function setupIPC() {
       if (skill?.execute && skill.source !== 'builtin') return 'skill_' + s.replace(/[^a-zA-Z0-9_]/g, '_')
       return s
     })
-    const finalPrompt = systemPrompt || buildSystemPrompt(agent, toolNames) || ''
+    // Knowledge skill auto-matching: inject relevant skills into system prompt
+    const skillMatch = matchSkills({ agentId: agent?.id || 'default', userMessage: message, maxSkills: 5 })
+    const knowledgeSkillInjection = buildSkillInjection(skillMatch)
+    const finalPrompt = systemPrompt || buildSystemPrompt(agent, toolNames, undefined, knowledgeSkillInjection) || ''
     const msgs: { role: string; content: string }[] = []
     // B01: Environment awareness injection
     const now = new Date()
@@ -777,8 +782,19 @@ function setupIPC() {
       const reliable = getReliableTools()
       if (unreliable.length > 0) envLines.push(`Unreliable tools: ${unreliable.join(', ')} — avoid, use alternatives`)
       if (reliable.length > 0) envLines.push(`Reliable tools: ${reliable.join(', ')} — prefer these`)
+      // P2-4: Error pattern learning — inject specific failure reasons
+      const stats = getToolStats()
+      const errorPatterns: string[] = []
+      for (const name of unreliable) {
+        const s = stats[name]
+        if (s?.lastError) {
+          const errHint = s.lastError.slice(0, 80).replace(/\n/g, ' ')
+          errorPatterns.push(`${name}: ${errHint}`)
+        }
+      }
+      if (errorPatterns.length > 0) envLines.push(`Error patterns:\n${errorPatterns.map(p => `- ${p}`).join('\n')}`)
       // Pass stats to orchestrator for dynamic recommendations
-      ;(globalThis as any).__toolStats = getToolStats()
+      ;(globalThis as any).__toolStats = stats
     } catch {}
     const envInfo = envLines.join('\n')
     const envRules = [
@@ -833,6 +849,22 @@ function setupIPC() {
     if (userProfileMemories.length > 0) {
       const profileLines = userProfileMemories.slice(0, 10).map((m: any) => `- ${m.content}`).join('\n')
       msgs.push({ role: 'system', content: `User profile (persistent preferences):\n${profileLines}` })
+    }
+    // P2-1: Inject recent task experience cards
+    const expMemories = memories.filter((m: any) => m.category === 'task_experience')
+    if (expMemories.length > 0) {
+      const recentExp = expMemories.slice(-3).map((m: any) => `- ${m.content}`).join('\n')
+      msgs.push({ role: 'system', content: `Recent task experience:\n${recentExp}` })
+    }
+    // P2-7: Cross-session task continuity — inject last task context for new conversations
+    if (!convId || !history || history.length === 0) {
+      const lastTask = memories.find((m: any) => m.id === 'last_task_state')
+      if (lastTask) {
+        const taskAge = Date.now() - new Date(lastTask.createdAt || 0).getTime()
+        if (taskAge < 24 * 60 * 60 * 1000) { // Only if within 24 hours
+          msgs.push({ role: 'system', content: `Previous session context: ${lastTask.content}\nIf the user's message relates to this task, continue from where they left off.` })
+        }
+      }
     }
     // Auto-inject relevant memories via FTS5
     if (memories.length > 0) {
@@ -889,6 +921,12 @@ function setupIPC() {
         const ragContext = topRag.map(r => r.text).join('\n\n---\n\n')
         msgs.push({ role: 'system', content: `Relevant knowledge base:\n${ragContext}` })
       }
+    }
+    // P2-3: Decision analysis template injection
+    const decisionKeywords = ['选择', '对比', '比较', '哪个好', '应该选', '推荐', '决策', '评估', '利弊', '优缺点', 'trade-off', 'which is better', 'should i choose']
+    const isDecisionQuestion = decisionKeywords.some(kw => message.toLowerCase().includes(kw))
+    if (isDecisionQuestion) {
+      msgs.push({ role: 'system', content: `The user is asking a decision/comparison question. Use this analysis framework:\n- 风险: What could go wrong with each option?\n- 收益: What are the benefits?\n- 成本: Time, money, effort required?\n- 替代方案: What other options exist?\n- 建议: Your recommendation with clear reasoning.\nShow your reasoning chain. Be specific with data/examples.` })
     }
     // A03: Smart window — keep recent + relevant + tool-rich history messages
     if (history) {
@@ -1620,6 +1658,65 @@ function setupIPC() {
       try { require('fs').appendFileSync(require('path').join(require('os').tmpdir(), 'aaronclaw-step.log'), `[${new Date().toISOString()}] STEP3: returning ok=true finalLen=${(finalText||'').length}\n`) } catch {}
       // Send complete message data to frontend
       mw?.webContents.send('chat:done', finalText, collectedThinking || '', collectedToolCalls)
+
+      // P2-1: Auto-generate experience card from completed task
+      try {
+        if (collectedToolCalls.length > 0 && finalText && !finalText.startsWith('Error:')) {
+          const toolSeq = collectedToolCalls.map((tc: any) => tc.function?.name).filter(Boolean)
+          const uniqueTools = [...new Set(toolSeq)]
+          const userMsg = message.slice(0, 100)
+          const resultSummary = finalText.slice(0, 200)
+          const expId = 'exp_' + Date.now()
+          const expContent = `Task: ${userMsg} | Tools: ${uniqueTools.join('→')} | Steps: ${toolSeq.length} | Result: ${resultSummary}`
+          kvUpsert('memory', expId, { id: expId, content: expContent, category: 'task_experience', importance: 0.6, createdAt: new Date().toISOString() })
+          try { memoryFtsUpsert(expId, expContent, 'task_experience') } catch {}
+
+          // P2-7: Save last task state for cross-session continuity
+          if (toolSeq.length >= 2) {
+            try {
+              const stateId = 'last_task_state'
+              const stateContent = `Last task: ${userMsg} | Tools: ${uniqueTools.join(', ')} | Status: completed | Time: ${new Date().toISOString()}`
+              kvUpsert('memory', stateId, { id: stateId, content: stateContent, category: 'task_state', importance: 0.8, createdAt: new Date().toISOString() })
+              try { memoryFtsUpsert(stateId, stateContent, 'task_state') } catch {}
+            } catch {}
+          }
+
+          // P2-2: Implicit user preference learning from tool usage
+          try {
+            const allMemories = cacheMemory()
+            // Detect tech stack from file extensions in tool args
+            const fileExts = collectedToolCalls
+              .map((tc: any) => { try { const a = JSON.parse(tc.function?.arguments || '{}'); return a.path || a.file_path || '' } catch { return '' } })
+              .filter(Boolean)
+              .map((p: string) => { const m = p.match(/\.(\w+)$/); return m ? m[1].toLowerCase() : '' })
+              .filter(Boolean)
+            const extCounts: Record<string, number> = {}
+            for (const ext of fileExts) extCounts[ext] = (extCounts[ext] || 0) + 1
+            const topExts = Object.entries(extCounts).sort((a, b) => b[1] - a[1]).slice(0, 3).map(e => e[0])
+            if (topExts.length > 0) {
+              const existing = allMemories.find((m: any) => m.category === 'user_pref' && m.content.includes('常用文件类型'))
+              const newContent = `常用文件类型: ${topExts.join(', ')}`
+              if (!existing) {
+                const id = 'mem-pref-ext-' + Date.now()
+                kvUpsert('memory', id, { id, content: newContent, category: 'user_pref', importance: 0.4, createdAt: new Date().toISOString() })
+                try { memoryFtsUpsert(id, newContent, 'user_pref') } catch {}
+              }
+            }
+            // Detect frequently used tool combinations
+            if (uniqueTools.length >= 2) {
+              const comboKey = uniqueTools.sort().join('+')
+              const existingCombo = allMemories.find((m: any) => m.category === 'user_pref' && m.content.includes(`常用工具组合: ${comboKey}`))
+              if (!existingCombo) {
+                const id = 'mem-pref-combo-' + Date.now()
+                const comboContent = `常用工具组合: ${comboKey}`
+                kvUpsert('memory', id, { id, content: comboContent, category: 'user_pref', importance: 0.3, createdAt: new Date().toISOString() })
+                try { memoryFtsUpsert(id, comboContent, 'user_pref') } catch {}
+              }
+            }
+          } catch {}
+        }
+      } catch {}
+
       return { ok: true, text: finalText }
     } catch (e) {
       if (myGen !== chatGeneration) { mw?.webContents.send('chat:done', '', '', []); return { ok: true, text: '' } }
@@ -1637,6 +1734,27 @@ function setupIPC() {
     }
   })
   ipcMain.handle('chat:cancel', () => { abortCtrl?.abort(); killAllProcesses(); return true })
+
+  // P2-5: Response quality feedback — track regenerate/fork signals
+  ipcMain.handle('chat:feedback', (_, { type, convId }: { type: 'regenerate' | 'fork' | 'good'; convId?: string }) => {
+    try {
+      const feedbackKey = 'feedback_' + Date.now()
+      const content = `Feedback: ${type} at ${new Date().toISOString()}${convId ? ' conv=' + convId : ''}`
+      kvUpsert('memory', feedbackKey, { id: feedbackKey, content, category: 'quality_feedback', importance: type === 'regenerate' ? 0.8 : 0.3, createdAt: new Date().toISOString() })
+      try { memoryFtsUpsert(feedbackKey, content, 'quality_feedback') } catch {}
+      // Track regenerate rate for adaptive behavior
+      const recentFeedbacks = cacheMemory().filter((m: any) => m.category === 'quality_feedback')
+      const regenCount = recentFeedbacks.filter((m: any) => m.content.includes('regenerate')).length
+      if (regenCount >= 3) {
+        // High regenerate rate — save as user preference to be more careful
+        const id = 'mem-pref-quality-' + Date.now()
+        const hint = '用户频繁重新生成回答，应该更仔细地理解需求，回答前先确认理解是否正确'
+        kvUpsert('memory', id, { id, content: hint, category: 'user_pref', importance: 0.7, createdAt: new Date().toISOString() })
+        try { memoryFtsUpsert(id, hint, 'user_pref') } catch {}
+      }
+    } catch {}
+    return { ok: true }
+  })
 
   // Multi-agent dispatch: decompose complex task into sub-tasks, execute with best agent for each
   ipcMain.handle('chat:dispatch', async (_, { message, convId }) => {
@@ -2206,6 +2324,8 @@ app.whenReady().then(() => {
   autoStartGateway()
   // GitHub 镜像预热(异步，不阻塞启动)
   warmupMirrors().catch(() => {})
+  // 知识技能引擎初始化
+  try { initSkillEngine() } catch {}
   // MCP removed — caused timeouts in China
 })
 

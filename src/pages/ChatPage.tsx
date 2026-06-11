@@ -1,46 +1,39 @@
-﻿import { useEffect, useState, useRef, useCallback } from 'react'
+﻿import { useEffect, useState, useRef, useCallback, useMemo } from 'react'
 import { useAppStore } from '../stores/appStore'
 import { api } from '../lib/ipc'
-import DOMPurify from 'dompurify'
-
-function renderMarkdown(text: string): string {
-  if (!text) return ''
-  let html = text
-    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
-    .replace(/```(\w*)\n([\s\S]*?)```/g, (_, lang, code) => `<div class="code-block"><div class="code-header"><span>${lang || 'code'}</span><button onclick="navigator.clipboard.writeText(this.closest('.code-block').querySelector('pre').textContent)">复制</button></div><pre>${code.trim()}</pre></div>`)
-    .replace(/`([^`]+)`/g, '<code style="background:var(--bg3);padding:1px 5px;border-radius:3px;font-family:var(--mono);font-size:12px">$1</code>')
-    .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
-    .replace(/\*(.+?)\*/g, '<em>$1</em>')
-    .replace(/^### (.+)$/gm, '<h3 style="font-size:14px;font-weight:600;margin:12px 0 6px">$1</h3>')
-    .replace(/^## (.+)$/gm, '<h2 style="font-size:15px;font-weight:600;margin:14px 0 8px">$1</h2>')
-    .replace(/^# (.+)$/gm, '<h1 style="font-size:16px;font-weight:700;margin:16px 0 10px">$1</h1>')
-    .replace(/^[-*] (.+)$/gm, '<li style="margin:2px 0;margin-left:16px">$1</li>')
-    .replace(/^\d+\. (.+)$/gm, '<li style="margin:2px 0;margin-left:16px;list-style:decimal">$1</li>')
-    .replace(/!\[([^\]]*)\]\(([^)]+)\)/g, '<div class="media-block"><img src="$2" alt="$1" loading="lazy" /></div>')
-    .replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a class="file-link" href="$2" target="_blank">$1</a>')
-    .replace(/\n\n/g, '</p><p>')
-    .replace(/\n/g, '<br>')
-  html = '<p>' + html + '</p>'
-  return DOMPurify.sanitize(html, {
-    ALLOWED_TAGS: ['p', 'br', 'strong', 'em', 'code', 'pre', 'h1', 'h2', 'h3', 'li', 'ul', 'ol', 'a', 'img', 'div', 'span', 'button'],
-    ALLOWED_ATTR: ['href', 'src', 'alt', 'class', 'style', 'onclick', 'target', 'loading'],
-    ALLOW_DATA_ATTR: false,
-  })
-}
+import { AlertModal } from '../components/ui'
+import { MessageBubble } from '../components/MessageBubble'
 
 export function ChatPage() {
-  const { currentConvId, setCurrentConvId, messages, setMessages, addMessage, isStreaming, setStreaming, streamBuf, appendToken, thinkBuf, appendThink, toolCalls, addToolCall, resetStream, setTokenUsage, conversations, setConversations } = useAppStore()
+  const currentConvId = useAppStore(s => s.currentConvId)
+  const setCurrentConvId = useAppStore(s => s.setCurrentConvId)
+  const messages = useAppStore(s => s.messages)
+  const setMessages = useAppStore(s => s.setMessages)
+  const addMessage = useAppStore(s => s.addMessage)
+  const isStreaming = useAppStore(s => s.isStreaming)
+  const setStreaming = useAppStore(s => s.setStreaming)
+  const streamBuf = useAppStore(s => s.streamBuf)
+  const appendToken = useAppStore(s => s.appendToken)
+  const thinkBuf = useAppStore(s => s.thinkBuf)
+  const appendThink = useAppStore(s => s.appendThink)
+  const toolCalls = useAppStore(s => s.toolCalls)
+  const addToolCall = useAppStore(s => s.addToolCall)
+  const resetStream = useAppStore(s => s.resetStream)
+  const setTokenUsage = useAppStore(s => s.setTokenUsage)
+  const conversations = useAppStore(s => s.conversations)
+  const setConversations = useAppStore(s => s.setConversations)
   const [input, setInput] = useState('')
-  const [models, setModels] = useState<any[]>([])
-  const [config, setConfig] = useState<any>({})
-  const [currentAgent, setCurrentAgent] = useState<any>(null)
-  const [expandedTools, setExpandedTools] = useState<Set<string>>(new Set())
-  const [expandedThinks, setExpandedThinks] = useState<Set<string>>(new Set())
+  const models = useAppStore(s => s.models)
+  const setModels = useAppStore(s => s.setModels)
+  const config = useAppStore(s => s.config)
+  const setConfig = useAppStore(s => s.setConfig)
+  const agents = useAppStore(s => s.agents)
+  const setAgents = useAppStore(s => s.setAgents)
+  const currentAgent = useAppStore(s => s.currentAgent)
+  const setCurrentAgent = useAppStore(s => s.setCurrentAgent)
   const [gwRunning, setGwRunning] = useState(true)
   const msgEndRef = useRef<HTMLDivElement>(null)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
-
-  // New features state
   const [replyingTo, setReplyingTo] = useState<{ idx: number; content: string } | null>(null)
   const [editingIdx, setEditingIdx] = useState<number | null>(null)
   const [editText, setEditText] = useState('')
@@ -50,26 +43,66 @@ export function ChatPage() {
   const [prompts, setPrompts] = useState<any[]>([])
   const [showSearchModal, setShowSearchModal] = useState(false)
   const [showMemoryModal, setShowMemoryModal] = useState(false)
+  const [showAlert, setShowAlert] = useState<{ message: string } | null>(null)
   const [searchInput, setSearchInput] = useState('')
   const [memoryInput, setMemoryInput] = useState('')
+  const tokenUsage = useAppStore(s => s.tokenUsage)
   const [playingTts, setPlayingTts] = useState<string | null>(null)
   const mediaRecorderRef = useRef<MediaRecorder | null>(null)
+
+  const contextInfo = useMemo(() => {
+    const modelId = config.ai?.model || 'openclaw'
+    const model = models.find((m: any) => m.id === modelId)
+    const total = model?.contextWindow || 128000
+    const used = tokenUsage || 0
+    const remaining = Math.max(0, total - used)
+    const pct = total > 0 ? Math.min(100, (used / total) * 100) : 0
+    const fmt = (n: number) => n >= 1000000 ? (n / 1000000).toFixed(1) + 'M' : n >= 1000 ? (n / 1000).toFixed(1) + 'k' : String(n)
+    return { used, total, remaining, pct, fmt }
+  }, [tokenUsage, config.ai?.model, models])
   const streamBufRef = useRef('')
+  const skipConvEffectRef = useRef(false)
+  const convLoadSeq = useRef(0)
 
   useEffect(() => {
     api.getConfig().then(setConfig).catch(console.error)
-    api.agentsList().then((a: any[]) => { if (a.length) setCurrentAgent(a[0]) }).catch(console.error)
+    api.agentsList().then((a: any[]) => {
+      setAgents(a)
+      // Only restore agent if not already set (Sidebar may have already done this)
+      const cur = useAppStore.getState().currentAgent
+      if (!cur && a.length) {
+        const saved = localStorage.getItem('currentAgentId')
+        const found = saved ? a.find((x: any) => x.id === saved) : null
+        setCurrentAgent(found || a[0])
+      }
+    }).catch(console.error)
     api.gatewayStatus().then((s: any) => setGwRunning(s.running)).catch(() => setGwRunning(false))
     api.modelsList().then((m: any[]) => setModels(m.filter(x => x.enabled !== false))).catch(console.error)
     api.promptsList?.().then(setPrompts).catch(() => {})
   }, [])
 
   useEffect(() => {
+    if (skipConvEffectRef.current) { skipConvEffectRef.current = false; return }
+    const seq = ++convLoadSeq.current
     if (currentConvId) {
       api.convMessages(currentConvId).then((msgs: any[]) => {
+        if (seq !== convLoadSeq.current) return
         setMessages(msgs)
         const total = msgs.reduce((s: number, m: any) => s + (m.tokens || Math.ceil((m.content || '').length / 4)), 0)
         setTokenUsage(total)
+        // Auto-resend orphaned user message (app closed before response)
+        if (msgs.length > 0 && msgs[msgs.length - 1].role === 'user') {
+          const orphanMsg = msgs[msgs.length - 1]
+          setTimeout(() => {
+            if (seq !== convLoadSeq.current) return
+            setStreaming(true)
+            resetStream()
+            const history = msgs.slice(-12).map((m: any) => { const h: any = { role: m.role, content: m.content }; if (m.tool_calls) { try { const parsed = JSON.parse(m.tool_calls); h.tool_calls = Array.isArray(parsed) ? parsed.filter((tc: any) => tc?.function?.name) : parsed } catch {} } if (m.tool_call_id) h.tool_call_id = m.tool_call_id; return h })
+            api.chatSend({ message: orphanMsg.content, history, model: config.ai?.model || currentAgent?.model, agentId: currentAgent?.id, convId: currentConvId })
+              .then((result: any) => { if (!result?.ok) { setStreaming(false); addMessage({ role: 'assistant', content: 'Error: ' + (result?.error || '服务无响应'), timestamp: new Date().toISOString() }) } })
+              .catch(() => setStreaming(false))
+          }, 500)
+        }
       }).catch(console.error)
     } else {
       setMessages([])
@@ -77,25 +110,67 @@ export function ChatPage() {
     }
   }, [currentConvId])
 
-  useEffect(() => { msgEndRef.current?.scrollIntoView({ behavior: 'smooth' }) }, [messages, streamBuf])
+  useEffect(() => {
+    const el = document.getElementById('messages')
+    if (el) requestAnimationFrame(() => { el.scrollTop = el.scrollHeight })
+  }, [messages, streamBuf, thinkBuf, isStreaming])
+
 
   useEffect(() => {
-    api.onChatToken((t: string) => { appendToken(t); streamBufRef.current += t })
+    let pendingTokenBuf = ''
+    let rafScheduled = false
+    api.onChatToken((t: string) => {
+      streamBufRef.current += t
+      pendingTokenBuf += t
+      if (!rafScheduled) {
+        rafScheduled = true
+        requestAnimationFrame(() => {
+          if (pendingTokenBuf) { appendToken(pendingTokenBuf); pendingTokenBuf = '' }
+          rafScheduled = false
+        })
+      }
+    })
     api.onChatThinking((t: string) => appendThink(t))
-    api.onChatToolCall((d: any) => addToolCall(d))
-    api.onChatDone(() => {
-      const buf = streamBufRef.current
+    api.onChatStage((stage: string) => {
+      if (stage === 'followup') {
+        // Tool results ready, starting follow-up — clear text buffer only, preserve thinking
+        const state = useAppStore.getState()
+        state.setStreamBuf('')
+        streamBufRef.current = ''
+      }
+    })
+    api.onChatToolCall((d: any) => {
+      addToolCall(d)
+    })
+    api.onChatDone((finalText: string, thinking?: string, toolCalls?: any[]) => {
       streamBufRef.current = ''
-      if (buf) addMessage({ role: 'assistant', content: streamBuf, timestamp: new Date().toISOString() })
-      setStreaming(false)
-      if (currentConvId && messages.length <= 2 && buf) {
-        const title = buf.slice(0, 50).replace(/[\n\r]/g, ' ').trim()
+      const state = useAppStore.getState()
+      const streamed = state.streamBuf || ''
+      const content = finalText || streamed || ''
+      // Capture streaming tool calls before reset
+      const streamedToolCalls = state.toolCalls || []
+      state.resetStream()
+      state.setStreaming(false)
+      if (!content) return
+      // Use streaming tool calls if backend didn't return any
+      const finalToolCalls = toolCalls?.length ? toolCalls : (streamedToolCalls.length ? streamedToolCalls : undefined)
+      state.addMessage({
+        id: 'stream_' + Date.now(),
+        role: 'assistant', content,
+        timestamp: new Date().toISOString(),
+        thinking: thinking || undefined,
+        tool_calls: finalToolCalls ? JSON.stringify(finalToolCalls) : undefined,
+      })
+      // Auto-title short conversations
+      const cid = state.currentConvId
+      if (cid && state.messages.length <= 3 && content) {
+        const title = content.slice(0, 50).replace(/[\n\r]/g, ' ').trim()
         if (title) {
-          const convs = useAppStore.getState().conversations
-          const conv = convs.find((c: any) => c.id === currentConvId)
+          const convs = state.conversations
+          const conv = convs.find((c: any) => c.id === cid)
           if (conv && (!conv.title || conv.title.length < 5)) {
             conv.title = title
-            useAppStore.getState().setConversations([...convs])
+            state.setConversations([...convs])
           }
         }
       }
@@ -103,7 +178,6 @@ export function ChatPage() {
     api.onChatError(() => setStreaming(false))
   }, [])
 
-  // Drag and drop
   useEffect(() => {
     const container = document.getElementById('page-chat')
     if (!container) return
@@ -115,7 +189,7 @@ export function ChatPage() {
       if (!files?.length) return
       for (const file of Array.from(files)) {
         const r = await api.capDocExtract((file as any).path)
-        if (r.ok) addMessage({ role: 'user', content: `[File] ${r.filename || file.name}\n\n${(r.content || '').slice(0, 3000)}`, timestamp: new Date().toISOString() })
+        if (r.ok) addMessage({ role: 'user', content: '[File] ' + (r.filename || file.name) + '\n\n' + (r.content || '').slice(0, 3000), timestamp: new Date().toISOString() })
       }
     }
     container.addEventListener('dragover', onDragOver)
@@ -128,47 +202,68 @@ export function ChatPage() {
     const msg = input.trim()
     if (!msg || isStreaming) return
     setInput('')
-    if (textareaRef.current) textareaRef.current.style.height = 'auto'
+    streamBufRef.current = ''
+    if (textareaRef.current) textareaRef.current.style.height = '44px'
     let convId = currentConvId
     if (!convId) {
-      convId = await api.convCreate(msg.slice(0, 50))
+      convId = await api.convCreate(msg.slice(0, 50), undefined, currentAgent?.id)
+      skipConvEffectRef.current = true
       setCurrentConvId(convId)
+      localStorage.setItem('lastConvId', convId)
+      api.convList().then(setConversations).catch(() => {})
     }
     let finalMsg = msg
     if (replyingTo) {
-      finalMsg = `> ${replyingTo.content}\n\n${msg}`
+      finalMsg = '> ' + replyingTo.content + '\n\n' + msg
       setReplyingTo(null)
     }
     addMessage({ role: 'user', content: finalMsg, timestamp: new Date().toISOString() })
     setStreaming(true)
     resetStream()
-    const history = messages.slice(-20).map((m: any) => ({ role: m.role, content: m.content }))
-    const result = await api.chatSend({ message: finalMsg, history, model: currentAgent?.model || config.ai?.model, convId })
-    if (!result?.ok) {
+    const history = messages.slice(-12).map((m: any) => { const h: any = { role: m.role, content: m.content }; if (m.tool_calls) { try { const parsed = JSON.parse(m.tool_calls); h.tool_calls = Array.isArray(parsed) ? parsed.filter((tc: any) => tc?.function?.name) : parsed } catch {} } if (m.tool_call_id) h.tool_call_id = m.tool_call_id; return h })
+    try {
+      const result = await api.chatSend({ message: finalMsg, history, model: config.ai?.model || currentAgent?.model, agentId: currentAgent?.id, convId })
+      if (!result?.ok) {
+        setStreaming(false)
+        const errMsg = result?.error || '服务无响应 — 请检查 OpenClaw Gateway 是否运行'
+        addMessage({ role: 'assistant', content: 'Error: ' + errMsg, timestamp: new Date().toISOString() })
+      }
+      // Note: on success, setStreaming(false) is called by chat:done event
+    } catch (e) {
       setStreaming(false)
-      addMessage({ role: 'assistant', content: 'Error: ' + (result?.error || 'Unknown'), timestamp: new Date().toISOString() })
+      const errMsg = e instanceof Error ? e.message : String(e)
+      addMessage({ role: 'assistant', content: 'Error: ' + (errMsg || 'IPC通信失败 — 请重启应用'), timestamp: new Date().toISOString() })
     }
+    // Safety: if streaming is still true after 120s, force reset (prevents stuck UI)
+    setTimeout(() => {
+      const state = useAppStore.getState()
+      if (state.isStreaming) { state.setStreaming(false); state.resetStream() }
+    }, 120000)
   }, [input, isStreaming, currentConvId, messages, config, replyingTo])
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
     if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleSend() }
-    if (e.key === 'Escape' && isStreaming) api.chatCancel()
+    if (e.key === 'Escape') {
+      if (isStreaming) api.chatCancel()
+      else if (editingIdx !== null) setEditingIdx(null)
+      else if (replyingTo) setReplyingTo(null)
+      else if (showPromptLib) setShowPromptLib(false)
+      else if (showSearchModal) setShowSearchModal(false)
+      else if (showMemoryModal) setShowMemoryModal(false)
+    }
   }
 
   const handleTextareaInput = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
     setInput(e.target.value)
-    e.target.style.height = 'auto'
-    e.target.style.height = Math.min(120, e.target.scrollHeight) + 'px'
-  }
-
-  const toggleTool = (id: string) => {
-    setExpandedTools(s => { const n = new Set(s); n.has(id) ? n.delete(id) : n.add(id); return n })
+    e.target.style.height = '44px'
+    const newHeight = Math.min(e.target.scrollHeight, 120)
+    e.target.style.height = newHeight + 'px'
   }
 
   const copyMessage = (content: string) => navigator.clipboard.writeText(content)
 
-  const handleTts = async (text: string) => {
-    setPlayingTts(text.slice(0, 20))
+  const handleTts = async (text: string, msgId: string) => {
+    setPlayingTts(msgId)
     const r = await api.capTts(text)
     if (r.ok && r.path) {
       const audio = new Audio('file:///' + r.path.replace(/\\/g, '/'))
@@ -185,10 +280,12 @@ export function ChatPage() {
     const newMsgs = messages.filter((_, i) => i !== removeIdx)
     const lastUser = [...newMsgs].reverse().find((m: any) => m.role === 'user')
     if (!lastUser) return
+    // P2-5: Send feedback signal for regeneration
+    api.chatFeedback?.({ type: 'regenerate', convId: currentConvId || undefined }).catch(() => {})
     setMessages(newMsgs)
     setStreaming(true); resetStream()
-    const history = newMsgs.filter((m: any) => m.role !== 'system').slice(-20).map((m: any) => ({ role: m.role, content: m.content }))
-    const result = await api.chatSend({ message: lastUser.content, history, model: currentAgent?.model || config.ai?.model, convId: currentConvId || undefined })
+    const history = newMsgs.filter((m: any) => m.role !== 'system').slice(-12).map((m: any) => { const h: any = { role: m.role, content: m.content }; if (m.tool_calls) { try { const parsed = JSON.parse(m.tool_calls); h.tool_calls = Array.isArray(parsed) ? parsed.filter((tc: any) => tc?.function?.name) : parsed } catch {} } if (m.tool_call_id) h.tool_call_id = m.tool_call_id; return h })
+    const result = await api.chatSend({ message: lastUser.content, history, model: config.ai?.model || currentAgent?.model, agentId: currentAgent?.id, convId: currentConvId || undefined })
     if (!result?.ok) { setStreaming(false); addMessage({ role: 'assistant', content: 'Error: ' + (result?.error || 'Unknown'), timestamp: new Date().toISOString() }) }
   }
 
@@ -210,34 +307,33 @@ export function ChatPage() {
     setMessages(truncated); setEditingIdx(null)
     if (messages[idx].role === 'user') {
       setStreaming(true); resetStream()
-      const history = truncated.slice(0, -1).map(m => ({ role: m.role, content: m.content }))
-      await api.chatSend({ message: editText, history, model: currentAgent?.model || config.ai?.model, convId: currentConvId || undefined })
+      const history = truncated.slice(0, -1).map(m => { const h: any = { role: m.role, content: m.content }; if (m.tool_calls) { try { const parsed = JSON.parse(m.tool_calls); h.tool_calls = Array.isArray(parsed) ? parsed.filter((tc: any) => tc?.function?.name) : parsed } catch {} } if (m.tool_call_id) h.tool_call_id = m.tool_call_id; return h })
+      await api.chatSend({ message: editText, history, model: config.ai?.model || currentAgent?.model, agentId: currentAgent?.id, convId: currentConvId || undefined })
     }
   }
 
-  // Voice recording
   const startRecording = async () => {
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
       const mediaRecorder = new MediaRecorder(stream, { mimeType: 'audio/webm;codecs=opus' })
       mediaRecorderRef.current = mediaRecorder
-      await api.invoke('voice:start')
+      await api.voiceStart()
       mediaRecorder.ondataavailable = async (e) => {
         if (e.data.size > 0) {
           const reader = new FileReader()
-          reader.onloadend = async () => { const base64 = (reader.result as string).split(',')[1]; await api.invoke('voice:chunk', base64) }
+          reader.onloadend = async () => { const base64 = (reader.result as string).split(',')[1]; await api.voiceChunk(base64) }
           reader.readAsDataURL(e.data)
         }
       }
       mediaRecorder.start(1000)
       setIsRecording(true)
-    } catch { alert('Cannot access microphone') }
+    } catch { setShowAlert({ message: '无法访问麦克风，请检查权限设置' }) }
   }
   const stopRecording = async () => {
     mediaRecorderRef.current?.stop()
     mediaRecorderRef.current?.stream.getTracks().forEach(t => t.stop())
     setIsRecording(false)
-    const result = await api.invoke('voice:stop')
+    const result = await api.voiceStop()
     if (result.ok && result.text) setInput(prev => prev + result.text)
   }
 
@@ -252,30 +348,18 @@ export function ChatPage() {
   }
 
   return (
-    <div className="page" id="page-chat" style={{ position: 'relative' }}>
+    <div className="page" id="page-chat">
       {isDragging && (
         <div style={{ position: 'absolute', inset: 0, zIndex: 100, background: 'rgba(79,70,229,0.1)', border: '2px dashed var(--accent)', borderRadius: 12, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 16, color: 'var(--accent)', fontWeight: 600 }}>
           {'拖放文件到这里'}
         </div>
       )}
       <div id="messages">
-        {messages.length === 0 && !streamBuf && (
-          <div className="welcome">
-            <img src="logo.png" alt="AaronClaw" style={{ width: 48, height: 48, borderRadius: 12, marginBottom: 14, boxShadow: '0 6px 18px rgba(79,70,229,0.18)' }} />
-            <h2 style={{ fontSize: 20, fontWeight: 650, marginBottom: 4, letterSpacing: -0.3 }}>AaronClaw AI Agent</h2>
-            <p style={{ color: 'var(--text2)', marginBottom: 20, fontSize: 13 }}>{'多模型'} / {'流式渲染'} / {'工具调用'} / {'长记忆'} / {'RAG'} / {'工作流'}</p>
-            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, justifyContent: 'center' }}>
-              {[{ label: '分析数据', prompt: '帮我分析一份 CSV 数据' }, { label: '调试代码', prompt: '帮我调试这段代码' }, { label: '写文章', prompt: '帮我写一篇文章' }, { label: '搜论文', prompt: '搜索相关论文' }].map((item) => (
-                <span key={item.label} onClick={() => setInput(item.prompt)} style={{ padding: '7px 14px', border: '1px solid var(--border)', borderRadius: 16, fontSize: 12.5, cursor: 'pointer', color: 'var(--text2)', transition: 'all 160ms ease' }}>{item.label}</span>
-              ))}
-            </div>
-          </div>
-        )}
-        {messages.map((m: any, i: number) => (
-          <div key={i} className={'msg ' + (m.role === 'user' ? 'user' : 'assistant')}>
-            <div className="avatar" style={{ background: m.role === 'user' ? 'linear-gradient(135deg,var(--accent),#6366f1)' : 'var(--text4)' }}>{m.role === 'user' ? 'U' : 'AI'}</div>
-            <div style={{ flex: 1, maxWidth: '78%' }}>
-              {editingIdx === i ? (
+        {messages.filter((m: any) => m.role !== 'tool').map((m: any, i: number) => (
+          editingIdx === i ? (
+            <div key={i} className="message-bubble user">
+              <div className="message-avatar">U</div>
+              <div className="message-content-wrapper">
                 <div style={{ display: 'flex', gap: 8, flexDirection: 'column' }}>
                   <textarea value={editText} onChange={e => setEditText(e.target.value)} rows={3}
                     style={{ width: '100%', border: '1px solid var(--accent)', borderRadius: 8, padding: 8, fontSize: 13, fontFamily: 'var(--font)', resize: 'vertical' }} autoFocus />
@@ -284,49 +368,38 @@ export function ChatPage() {
                     <button className="btn btn-sm btn-primary" onClick={() => handleSaveEdit(i)}>保存并重新生成</button>
                   </div>
                 </div>
-              ) : (
-                <div className="bubble" dangerouslySetInnerHTML={{ __html: m.role === 'user' ? m.content.replace(/\n/g, '<br>') : renderMarkdown(m.content) }}></div>
-              )}
-              <div className="msg-actions">
-                <button className="msg-action-btn" onClick={() => copyMessage(m.content)} title="复制">{'\ud83d\udccb'}</button>
-                {m.role === 'user' && <button className="msg-action-btn" onClick={() => handleEditMessage(i, m.content)} title="编辑">{'\u270f\ufe0f'}</button>}
-                {m.role === 'assistant' && <button className="msg-action-btn" onClick={() => handleTts(m.content)} title="朗读" disabled={playingTts !== null}>{playingTts === m.content.slice(0, 20) ? '\u23f9' : '\ud83d\udd0a'}</button>}
-                <button className="msg-action-btn" onClick={() => setReplyingTo({ idx: i, content: m.content.slice(0, 100) })} title="引用回复">{'\ud83d\udcac'}</button>
-                <button className="msg-action-btn" onClick={() => handleFork(i)} title="从此处分叉">{'\ud83d\udd00'}</button>
-                {i === messages.length - 1 && m.role === 'assistant' && <button className="msg-action-btn" onClick={regenerate} title="重新生成">{'\u21bb'}</button>}
               </div>
             </div>
-          </div>
+          ) : (
+            <MessageBubble
+              key={i}
+              role={m.role}
+              content={m.content}
+              thinking={m.thinking}
+              toolCalls={m.tool_calls ? (() => { try { return JSON.parse(m.tool_calls) } catch { return undefined } })() : undefined}
+              isStreaming={false}
+              onCopy={() => copyMessage(m.content)}
+              onEdit={m.role === 'user' ? () => handleEditMessage(i, m.content) : undefined}
+              onTts={m.role === 'assistant' ? () => handleTts(m.content, 'msg-' + i) : undefined}
+              onReplyQuote={() => setReplyingTo({ idx: i, content: m.content.slice(0, 100) })}
+              onFork={() => handleFork(i)}
+              onRegenerate={i === messages.length - 1 && m.role === 'assistant' ? regenerate : undefined}
+              ttsPlaying={playingTts === 'msg-' + i}
+            />
+          )
         ))}
-        {thinkBuf && (
-          <div className="think-block open">
-            <div className="think-header">{'\ud83d\udca1'} {'思考中...'}</div>
-            <div className="think-body">{thinkBuf}</div>
-          </div>
-        )}
-        {toolCalls.map((tc: any, i: number) => (
-          <div key={i} className={'tool-card' + (expandedTools.has(tc.id || String(i)) ? ' open' : '')}>
-            <div className="tool-header" onClick={() => toggleTool(tc.id || String(i))}>
-              <span className={'sdot ' + (tc.status || 'running')}></span>
-              <span className="tool-name">{tc.name || 'tool_call'}</span>
-              {tc.status === 'done' && <span className="badge badge-green" style={{ fontSize: 9 }}>{'完成'}</span>}
-              {tc.status === 'error' && <span className="badge badge-red" style={{ fontSize: 9 }}>{'失败'}</span>}
-            </div>
-            <div className="tool-body">
-              {tc.output ? <pre style={{ whiteSpace: 'pre-wrap', fontSize: 11, margin: 0 }}>{tc.output}</pre> : (tc.args ? JSON.stringify(tc.args, null, 2) : '无详细信息')}
-            </div>
-          </div>
-        ))}
-        {streamBuf && !thinkBuf && (
-          <div className="msg assistant">
-            <div className="avatar">AI</div>
-            <div className="bubble" dangerouslySetInnerHTML={{ __html: renderMarkdown(streamBuf) }}></div>
-          </div>
+        {isStreaming && (
+          <MessageBubble
+            role="assistant"
+            content={streamBuf}
+            thinking={thinkBuf || undefined}
+            toolCalls={toolCalls.length > 0 ? toolCalls : undefined}
+            isStreaming={true}
+          />
         )}
         <div ref={msgEndRef}></div>
       </div>
 
-      {/* Reply indicator */}
       {replyingTo && (
         <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '6px 12px', background: 'var(--accent-light)', borderLeft: '3px solid var(--accent)', fontSize: 12, color: 'var(--text2)' }}>
           <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>引用: {replyingTo.content}</span>
@@ -334,29 +407,34 @@ export function ChatPage() {
         </div>
       )}
 
-      {/* Input tools */}
       <div className="input-tools">
         <button onClick={() => handleInputTool('附件')}>附件</button>
         <button onClick={() => handleInputTool('搜索')}>搜索</button>
         <button onClick={() => handleInputTool('记忆')}>记忆</button>
-        <button onClick={() => setShowPromptLib(true)}>Prompt</button>
+        <button onClick={() => setShowPromptLib(true)}>提示词</button>
+        <div style={{ flex: 1 }} />
+        <div style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 11, color: 'var(--text4)', userSelect: 'none' }}>
+          <span>{contextInfo.fmt(contextInfo.used)} / {contextInfo.fmt(contextInfo.total)}</span>
+          <div style={{ width: 60, height: 4, background: 'var(--bg3)', borderRadius: 2, overflow: 'hidden' }}>
+            <div style={{ width: contextInfo.pct + '%', height: '100%', borderRadius: 2, background: contextInfo.pct > 80 ? 'var(--error)' : contextInfo.pct > 50 ? 'var(--warning)' : 'var(--accent)', transition: 'width 0.3s' }} />
+          </div>
+          <span>剩余 {contextInfo.fmt(contextInfo.remaining)}</span>
+        </div>
       </div>
 
-      {/* Input area */}
-      <div className="input-area" style={{ display: 'flex', gap: 8, alignItems: 'flex-end' }}>
-        <textarea ref={textareaRef} rows={1} placeholder={isStreaming ? 'AI 思考中...' : '输入消息... (Enter 发送, Shift+Enter 换行)'} value={input} onChange={handleTextareaInput} onKeyDown={handleKeyDown} disabled={isStreaming} style={{ flex: 1 }} />
+      <div className="input-area">
+        <textarea ref={textareaRef} rows={1} placeholder={isStreaming ? 'AI 思考中...' : '输入消息... (Enter 发送, Shift+Enter 换行)'} value={input} onChange={handleTextareaInput} onKeyDown={handleKeyDown} disabled={isStreaming} />
         <button className="send-btn" onClick={isRecording ? stopRecording : startRecording}
-          style={{ background: isRecording ? 'var(--error)' : undefined, width: 36, height: 36, borderRadius: 8, border: 'none', cursor: 'pointer', fontSize: 14, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-          {isRecording ? '\u23f9' : '\ud83c\udfa4'}
+          style={{ background: isRecording ? 'var(--error)' : 'var(--bg3)', color: isRecording ? '#fff' : 'var(--text2)', fontSize: 16 }}>
+          {isRecording ? '■' : '🎤'}
         </button>
-        <button className="send-btn" onClick={handleSend} disabled={isStreaming || !input.trim() || !gwRunning}>{isStreaming ? '\u25a0' : '\u2191'}</button>
+        <button className="send-btn" onClick={isStreaming ? () => api.chatCancel() : handleSend} disabled={!isStreaming && (!input.trim() || !gwRunning)} style={isStreaming ? { background: 'var(--error)' } : undefined}>{isStreaming ? '■' : '➤'}</button>
       </div>
 
-      {/* Prompt library modal */}
       {showPromptLib && (
         <div className="modal-overlay" onClick={() => setShowPromptLib(false)}>
           <div className="modal" onClick={e => e.stopPropagation()} style={{ minWidth: 500 }}>
-            <div className="modal-header"><h3>Prompt 模板库</h3></div>
+            <div className="modal-header"><h3>提示词模板库</h3></div>
             <div className="modal-body" style={{ maxHeight: 400, overflow: 'auto' }}>
               {prompts.length === 0 && <div style={{ padding: 16, textAlign: 'center', color: 'var(--text4)', fontSize: 12 }}>无模板</div>}
               {prompts.map(p => (
@@ -374,7 +452,6 @@ export function ChatPage() {
         </div>
       )}
 
-      {/* Search modal */}
       {showSearchModal && (
         <div className="modal-overlay" onClick={() => setShowSearchModal(false)}>
           <div className="modal" onClick={e => e.stopPropagation()}>
@@ -390,7 +467,6 @@ export function ChatPage() {
         </div>
       )}
 
-      {/* Memory modal */}
       {showMemoryModal && (
         <div className="modal-overlay" onClick={() => setShowMemoryModal(false)}>
           <div className="modal" onClick={e => e.stopPropagation()}>
@@ -405,6 +481,7 @@ export function ChatPage() {
           </div>
         </div>
       )}
+      {showAlert && <AlertModal message={showAlert.message} onClose={() => setShowAlert(null)} />}
     </div>
   )
 }
