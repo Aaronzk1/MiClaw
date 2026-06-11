@@ -81,6 +81,20 @@ const defaultBehavior: BehaviorMode = {
 
 let currentBehavior: BehaviorMode = { ...defaultBehavior }
 
+// P3-5: Persist behavior mode to DB
+function persistBehaviorMode(): void {
+  try { kvUpsert('config', 'behavior_mode', currentBehavior) } catch {}
+}
+
+export function loadBehaviorMode(): void {
+  try {
+    const saved = kvGet('config', 'behavior_mode')
+    if (saved && typeof saved === 'object') {
+      currentBehavior = { ...defaultBehavior, ...saved }
+    }
+  } catch {}
+}
+
 export function getBehaviorMode(): BehaviorMode {
   return { ...currentBehavior }
 }
@@ -178,28 +192,29 @@ export function getExperienceHint(message: string): string | null {
 
 export function learnFromFeedback(message: string): void {
   const lower = message.toLowerCase()
+  let behaviorChanged = false
 
   // Update behavior mode in real-time
   if (/太长|太啰嗦|简洁点|太详细|简短/.test(lower)) {
-    currentBehavior.verbose = false
+    currentBehavior.verbose = false; behaviorChanged = true
   }
   if (/详细|展开|具体|详细说/.test(lower)) {
-    currentBehavior.verbose = true
+    currentBehavior.verbose = true; behaviorChanged = true
   }
   if (/别废话|不要解释|直接做|不要说步骤/.test(lower)) {
-    currentBehavior.explainSteps = false
+    currentBehavior.explainSteps = false; behaviorChanged = true
   }
   if (/解释一下|详细说|展开讲/.test(lower)) {
-    currentBehavior.explainSteps = true
+    currentBehavior.explainSteps = true; behaviorChanged = true
   }
   if (/太慢了|快点|加速/.test(lower)) {
-    currentBehavior.speed = 'fast'
+    currentBehavior.speed = 'fast'; behaviorChanged = true
   }
   if (/中文|说中文|用中文/.test(lower)) {
-    currentBehavior.language = 'zh'
+    currentBehavior.language = 'zh'; behaviorChanged = true
   }
   if (/english|speak english|in english/.test(lower)) {
-    currentBehavior.language = 'en'
+    currentBehavior.language = 'en'; behaviorChanged = true
   }
   // Banned tools detection
   const bannedMatch = lower.match(/不要用(\w+)|别用(\w+)/)
@@ -207,8 +222,11 @@ export function learnFromFeedback(message: string): void {
     const tool = bannedMatch[1] || bannedMatch[2]
     if (tool && !currentBehavior.bannedTools.includes(tool)) {
       currentBehavior.bannedTools.push(tool)
+      behaviorChanged = true
     }
   }
+  // P3-5: Persist behavior mode when changed
+  if (behaviorChanged) persistBehaviorMode()
 
   for (const { pattern, memory } of CORRECTION_PATTERNS) {
     if (pattern.test(message)) {
@@ -298,6 +316,35 @@ function extractEntities(message: string): void {
       smartSaveMemory(id, `用户常用操作: ${action}`, 'user_profile', 0.4)
       break
     }
+  }
+}
+
+// P3-1: Knowledge graph query — find entities and relations relevant to a message
+export function queryKnowledgeGraph(message: string): { entities: string[]; relations: string[] } {
+  const allMemories = kvList('memory')
+  const entities = allMemories.filter((m: any) => m.category === 'entity')
+  const lower = message.toLowerCase()
+
+  // Find matching entities
+  const matchedEntities: string[] = []
+  const matchedRelations: string[] = []
+  for (const e of entities) {
+    const content = (e.content || '').toLowerCase()
+    // Check if entity content shares keywords with message
+    const words = content.split(/[\s:：,，、]+/).filter((w: string) => w.length > 1)
+    const matchCount = words.filter((w: string) => lower.includes(w)).length
+    if (matchCount > 0) {
+      if (content.startsWith('关系:')) {
+        matchedRelations.push(e.content)
+      } else {
+        matchedEntities.push(e.content)
+      }
+    }
+  }
+
+  return {
+    entities: [...new Set(matchedEntities)].slice(0, 5),
+    relations: [...new Set(matchedRelations)].slice(0, 5),
   }
 }
 
@@ -403,8 +450,8 @@ export function getTopPatterns(limit = 5): Array<{ signature: string; count: num
 export function detectRepeatedPattern(toolSequence: string[], userMessage: string): { message: string; autoSkill: AutoSkillDef | null } | null {
   if (toolSequence.length < 2) return null
 
-  // Create a pattern signature from tool sequence
-  const sig = toolSequence.sort().join('→')
+  // Create a pattern signature from tool sequence (don't mutate input)
+  const sig = [...toolSequence].sort().join('→')
   const existing = taskPatternCounts.get(sig) || { count: 0, lastSeen: 0, examples: [] }
   existing.count++
   existing.lastSeen = Date.now()
@@ -414,7 +461,7 @@ export function detectRepeatedPattern(toolSequence: string[], userMessage: strin
   // Persist after every detection
   persistPatterns()
 
-  // Auto-generate skill after 3 repetitions
+  // Auto-generate skill after 3 repetitions (only trigger once)
   if (existing.count === 3) {
     const tools = toolSequence.join(', ')
     const autoSkill = autoGenerateSkill(sig, existing.count, existing.examples)
@@ -782,4 +829,72 @@ export function classifyIntent(msg: string): { intent: string; confidence: numbe
 // Reset intent state (e.g., on conversation switch)
 export function resetIntentState(): void {
   lastIntent = null
+}
+
+// P3-3: Self-optimization — analyze metrics and auto-adjust system behavior
+export function analyzeAndOptimize(): { actions: string[]; metrics: Record<string, any> } {
+  const actions: string[] = []
+  const metrics: Record<string, any> = {}
+
+  try {
+    // 1. Analyze tool success rates and flag consistently failing tools
+    const toolStatsData = kvGet('config', 'tool_stats')
+    if (toolStatsData?.stats) {
+      const stats = toolStatsData.stats as Record<string, any>
+      const failing: string[] = []
+      const excelling: string[] = []
+      for (const [name, s] of Object.entries(stats)) {
+        if (s.calls >= 5 && s.successRate < 0.3) {
+          failing.push(name)
+        }
+        if (s.calls >= 5 && s.successRate >= 0.9 && s.avgQuality >= 7) {
+          excelling.push(name)
+        }
+      }
+      metrics.failingTools = failing
+      metrics.excellingTools = excelling
+      if (failing.length > 0) {
+        actions.push(`Tools consistently failing: ${failing.join(', ')} — consider disabling or finding alternatives`)
+      }
+    }
+
+    // 2. Analyze regenerate rate from quality feedback
+    const allMemories = kvList('memory')
+    const feedbacks = allMemories.filter((m: any) => m.category === 'quality_feedback')
+    const recentFeedbacks = feedbacks.filter((m: any) => Date.now() - new Date(m.createdAt || 0).getTime() < 7 * 24 * 60 * 60 * 1000)
+    const regenCount = recentFeedbacks.filter((m: any) => m.content.includes('regenerate')).length
+    metrics.regenerateRate = recentFeedbacks.length > 0 ? regenCount / recentFeedbacks.length : 0
+    if (metrics.regenerateRate > 0.3 && recentFeedbacks.length >= 5) {
+      actions.push(`High regenerate rate (${Math.round(metrics.regenerateRate * 100)}%) — responses may not meet user expectations`)
+    }
+
+    // 3. Analyze task completion patterns
+    const experiences = allMemories.filter((m: any) => m.category === 'task_experience')
+    const recentExps = experiences.filter((m: any) => Date.now() - new Date(m.createdAt || 0).getTime() < 7 * 24 * 60 * 60 * 1000)
+    metrics.tasksThisWeek = recentExps.length
+
+    // 4. Analyze most common tool combinations
+    const comboFreq: Record<string, number> = {}
+    for (const exp of recentExps) {
+      const match = (exp.content || '').match(/Tools: ([^|]+)/)
+      if (match) {
+        const combo = match[1].trim()
+        comboFreq[combo] = (comboFreq[combo] || 0) + 1
+      }
+    }
+    const topCombos = Object.entries(comboFreq).sort((a, b) => b[1] - a[1]).slice(0, 3)
+    metrics.topToolCombos = topCombos
+
+    // 5. Save optimization summary as memory
+    if (actions.length > 0) {
+      const optId = 'opt_' + Date.now()
+      const optContent = `Optimization analysis: ${actions.join(' | ')}`
+      kvUpsert('memory', optId, { id: optId, content: optContent, category: 'optimization', importance: 0.4, createdAt: new Date().toISOString() })
+      try { memoryFtsUpsert(optId, optContent, 'optimization') } catch {}
+    }
+  } catch (e) {
+    logger.warn('Optimize', `Analysis failed: ${(e as Error).message}`)
+  }
+
+  return { actions, metrics }
 }

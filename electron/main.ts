@@ -3,7 +3,7 @@ import { join, normalize, resolve } from 'path'
 import { existsSync, readFileSync, writeFileSync, mkdirSync, readdirSync, statSync, copyFileSync } from 'fs'
 import { homedir, tmpdir } from 'os'
 import { exec, execFile } from 'child_process'
-import { executeTool, killAllProcesses, isPathAllowed, recordToolCall, validateToolParams, checkOutputQuality, loadToolStats, compressToolResult, getReliableTools, getUnreliableTools, getToolStats, computeResultQuality } from './ipc/tool-executor'
+import { executeTool, killAllProcesses, isPathAllowed, recordToolCall, validateToolParams, checkOutputQuality, loadToolStats, compressToolResult, getReliableTools, getUnreliableTools, getToolStats, computeResultQuality, recordToolCombination, getReliableCombinations, getSlowTools } from './ipc/tool-executor'
 import { buildSystemPrompt, BASE_PROMPT, detectMultiStepTask, extractSteps, startTaskTracking, getTaskProgressHint, clearTaskTracking } from './ipc/orchestrator'
 import { initSkillEngine, matchSkills, buildSkillInjection } from './ipc/skill-engine'
 import './ipc/builtin-skills'
@@ -200,7 +200,7 @@ function checkForLoop(toolName: string): string | null {
   return null
 }
 import { selectTools, parseTextToolCalls } from './ipc/tools'
-import { learnFromFeedback, selectModel, classifyIntent, logBehavior, getProactiveSuggestions, resetIntentState, loadBehaviorLog, setEmotionalContext, summarizeConversation, detectRepeatedPattern, getContextualGreeting, resetBehaviorMode, getUnifiedResponseGuidance, getExperienceHint, loadPatternCounts, getTopPatterns } from './ipc/feedback'
+import { learnFromFeedback, selectModel, classifyIntent, logBehavior, getProactiveSuggestions, resetIntentState, loadBehaviorLog, setEmotionalContext, summarizeConversation, detectRepeatedPattern, getContextualGreeting, resetBehaviorMode, getUnifiedResponseGuidance, getExperienceHint, loadPatternCounts, getTopPatterns, queryKnowledgeGraph, analyzeAndOptimize, loadBehaviorMode } from './ipc/feedback'
 import { streamChat as llmStreamChat, wrapToolResult, type StreamContext } from './ipc/llm'
 import { seedDefaults, migrateFromJSON } from './ipc/seed'
 import { connectMcpServer, disconnectMcpServer, callMcpTool, getMcpTools, getMcpStatus } from './ipc/mcp-client'
@@ -655,6 +655,7 @@ function setupIPC() {
   let chatGeneration = 0
   let lastConvId: string | null = null
   ipcMain.handle('chat:send', async (_, { message, history, systemPrompt, model, agentId, convId }) => {
+    const perfStart = Date.now()
     // Reset intent state when switching conversations, summarize previous conversation
     if (convId !== lastConvId) {
       if (lastConvId) {
@@ -782,6 +783,12 @@ function setupIPC() {
       const reliable = getReliableTools()
       if (unreliable.length > 0) envLines.push(`Unreliable tools: ${unreliable.join(', ')} — avoid, use alternatives`)
       if (reliable.length > 0) envLines.push(`Reliable tools: ${reliable.join(', ')} — prefer these`)
+      // P3-4: Inject reliable tool combinations
+      const reliableCombos = getReliableCombinations()
+      if (reliableCombos.length > 0) envLines.push(`Reliable tool combos: ${reliableCombos.join('; ')}`)
+      // P3-6: Inject slow tool warnings
+      const slowTools = getSlowTools()
+      if (slowTools.length > 0) envLines.push(`Slow tools (>5s avg): ${slowTools.join(', ')} — use only when necessary`)
       // P2-4: Error pattern learning — inject specific failure reasons
       const stats = getToolStats()
       const errorPatterns: string[] = []
@@ -866,6 +873,16 @@ function setupIPC() {
         }
       }
     }
+    // P3-1: Knowledge graph injection — entities and relations relevant to current message
+    try {
+      const kg = queryKnowledgeGraph(message)
+      if (kg.entities.length > 0 || kg.relations.length > 0) {
+        const kgLines: string[] = []
+        if (kg.entities.length > 0) kgLines.push(`Known entities: ${kg.entities.join('; ')}`)
+        if (kg.relations.length > 0) kgLines.push(`Known relations: ${kg.relations.join('; ')}`)
+        msgs.push({ role: 'system', content: `Knowledge graph:\n${kgLines.join('\n')}` })
+      }
+    } catch {}
     // Auto-inject relevant memories via FTS5
     if (memories.length > 0) {
       const msgLower = message.toLowerCase()
@@ -1329,9 +1346,11 @@ function setupIPC() {
           notifyToolCall(mw, { id: tc.id, name: tc.function.name }, 'running')
           // Route MCP tools to MCP client, built-in tools to executeTool
           const mcpServerId = mcpToolMap.get(tc.function.name)
+          const toolStart = Date.now()
           let toolResult = mcpServerId
             ? await callMcpTool(mcpServerId, tc.function.name, parsedArgs)
             : await executeTool(tc.function.name, parsedArgs)
+          const toolExecTime = Date.now() - toolStart
           let isError = toolResult.includes('[ERROR]') || (toolResult.startsWith('{') && /"error"\s*:/.test(toolResult))
 
           // P1-4: Intelligent retry — adjust parameters based on error before falling back
@@ -1405,7 +1424,7 @@ function setupIPC() {
 
           breaker.record(tc.function.name, isError)
           const resultQuality = computeResultQuality(tc.function.name, toolResult)
-          recordToolCall(tc.function.name, !isError, isError ? toolResult.slice(0, 200) : undefined, resultQuality)
+          recordToolCall(tc.function.name, !isError, isError ? toolResult.slice(0, 200) : undefined, resultQuality, toolExecTime)
           const correctedResult = wrapToolResult(toolResult, tc.function.name)
           const displayOutput = toolResult.length > 500 ? toolResult.slice(0, 500) + '...' : toolResult
           notifyToolCall(mw, { id: tc.id, name: tc.function.name }, isError ? 'error' : 'done', displayOutput)
@@ -1662,7 +1681,9 @@ function setupIPC() {
       // P2-1: Auto-generate experience card from completed task
       try {
         if (collectedToolCalls.length > 0 && finalText && !finalText.startsWith('Error:')) {
+          // P3-4: Record tool combination success
           const toolSeq = collectedToolCalls.map((tc: any) => tc.function?.name).filter(Boolean)
+          if (toolSeq.length >= 2) recordToolCombination(toolSeq, true)
           const uniqueTools = [...new Set(toolSeq)]
           const userMsg = message.slice(0, 100)
           const resultSummary = finalText.slice(0, 200)
@@ -1716,6 +1737,23 @@ function setupIPC() {
           } catch {}
         }
       } catch {}
+
+      // P3-3: Self-optimization — run analysis every 10 completions
+      try {
+        if (!(globalThis as any).__optCounter) (globalThis as any).__optCounter = 0
+        ;(globalThis as any).__optCounter++
+        if ((globalThis as any).__optCounter >= 10) {
+          (globalThis as any).__optCounter = 0
+          const opt = analyzeAndOptimize()
+          if (opt.actions.length > 0) console.log('[Optimize]', opt.actions.join('; '))
+        }
+      } catch {}
+
+      // P3-6: Performance tracking
+      const perfTotal = Date.now() - perfStart
+      if (perfTotal > 10000) {
+        console.warn(`[Perf] Slow chat:send: ${perfTotal}ms for "${message.slice(0, 50)}..." (${collectedToolCalls.length} tools)`)
+      }
 
       return { ok: true, text: finalText }
     } catch (e) {
@@ -2313,6 +2351,7 @@ app.whenReady().then(() => {
   try { runMemoryMaintenance() } catch (e) { logger.error('Startup', 'Memory maintenance failed', e) }
   // Load persisted behavior log for proactive suggestions
   try { loadBehaviorLog() } catch {}
+  try { loadBehaviorMode() } catch {}
   // Load persisted tool stats for self-learning
   try { loadToolStats() } catch {}
   // Load persisted pattern counts for auto skill generation
