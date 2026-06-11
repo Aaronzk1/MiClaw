@@ -3,7 +3,7 @@ import { join, normalize, resolve } from 'path'
 import { existsSync, readFileSync, writeFileSync, mkdirSync, readdirSync, statSync, copyFileSync } from 'fs'
 import { homedir, tmpdir } from 'os'
 import { exec, execFile } from 'child_process'
-import { executeTool, killAllProcesses, isPathAllowed, recordToolCall, validateToolParams, checkOutputQuality, loadToolStats, compressToolResult, getReliableTools, getUnreliableTools, getToolStats, computeResultQuality, recordToolCombination, getReliableCombinations, getSlowTools } from './ipc/tool-executor'
+import { executeTool, killAllProcesses, isPathAllowed, recordToolCall, validateToolParams, checkOutputQuality, loadToolStats, compressToolResult, translateError, getReliableTools, getUnreliableTools, getToolStats, computeResultQuality, recordToolCombination, getReliableCombinations, getSlowTools } from './ipc/tool-executor'
 import { buildSystemPrompt, BASE_PROMPT, detectMultiStepTask, extractSteps, startTaskTracking, getTaskProgressHint, clearTaskTracking } from './ipc/orchestrator'
 import { initSkillEngine, matchSkills, buildSkillInjection } from './ipc/skill-engine'
 import './ipc/builtin-skills'
@@ -850,32 +850,37 @@ function setupIPC() {
       // Verify if: multiple tools used, or complex tools, or error recovery happened
       return toolCalls.length >= 3 || toolCalls.some(tc => ['ac_terminal', 'code_execute', 'ac_write_file'].includes(tc.function.name))
     }
-    // P0-1: Always inject user profile (user_pref memories) for persistent personalization
+    // Memory injection — single-pass with targeted FTS5 queries
     const memories = cacheMemory()
-    const userProfileMemories = memories.filter((m: any) => m.category === 'user_pref')
-    if (userProfileMemories.length > 0) {
-      const profileLines = userProfileMemories.slice(0, 10).map((m: any) => `- ${m.content}`).join('\n')
-      msgs.push({ role: 'system', content: `User profile (persistent preferences):\n${profileLines}` })
+    const memoryCategories: Record<string, any[]> = {}
+    let lastTask: any = null
+    for (const m of memories) {
+      const cat = m.category || 'general'
+      if (!memoryCategories[cat]) memoryCategories[cat] = []
+      memoryCategories[cat].push(m)
+      if (m.id === 'last_task_state') lastTask = m
     }
-    // P2-1: Inject recent task experience cards
-    const expMemories = memories.filter((m: any) => m.category === 'task_experience')
-    if (expMemories.length > 0) {
-      const recentExp = expMemories.slice(-3).map((m: any) => `- ${m.content}`).join('\n')
-      msgs.push({ role: 'system', content: `Recent task experience:\n${recentExp}` })
+    // User profile (user_pref)
+    const userPrefs = memoryCategories['user_pref']
+    if (userPrefs?.length > 0) {
+      msgs.push({ role: 'system', content: `User profile (persistent preferences):\n${userPrefs.slice(0, 10).map((m: any) => `- ${m.content}`).join('\n')}` })
     }
-    // P2-7: Cross-session task continuity — inject last task context for new conversations
-    if (!convId || !history || history.length === 0) {
-      const lastTask = memories.find((m: any) => m.id === 'last_task_state')
-      if (lastTask) {
-        const taskAge = Date.now() - new Date(lastTask.createdAt || 0).getTime()
-        if (taskAge < 24 * 60 * 60 * 1000) { // Only if within 24 hours
-          msgs.push({ role: 'system', content: `Previous session context: ${lastTask.content}\nIf the user's message relates to this task, continue from where they left off.` })
-        }
+    // Task experience (task_experience)
+    const taskExps = memoryCategories['task_experience']
+    if (taskExps?.length > 0) {
+      msgs.push({ role: 'system', content: `Recent task experience:\n${taskExps.slice(-3).map((m: any) => `- ${m.content}`).join('\n')}` })
+    }
+    // Cross-session continuity
+    if (lastTask && (!convId || !history || history.length === 0)) {
+      const taskAge = Date.now() - new Date(lastTask.createdAt || 0).getTime()
+      if (taskAge < 86400000) {
+        msgs.push({ role: 'system', content: `Previous session context: ${lastTask.content}\nIf the user's message relates to this task, continue from where they left off.` })
       }
     }
-    // P3-1: Knowledge graph injection — entities and relations relevant to current message
+    // Knowledge graph — entities matching current message (pass pre-filtered list)
     try {
-      const kg = queryKnowledgeGraph(message)
+      const entityMemories = memoryCategories['entity'] || []
+      const kg = queryKnowledgeGraph(message, entityMemories)
       if (kg.entities.length > 0 || kg.relations.length > 0) {
         const kgLines: string[] = []
         if (kg.entities.length > 0) kgLines.push(`Known entities: ${kg.entities.join('; ')}`)
@@ -883,60 +888,57 @@ function setupIPC() {
         msgs.push({ role: 'system', content: `Knowledge graph:\n${kgLines.join('\n')}` })
       }
     } catch {}
-    // Auto-inject relevant memories via FTS5
+    // FTS5 memory search — simplified token extraction
     if (memories.length > 0) {
-      const msgLower = message.toLowerCase()
-      const words = msgLower.split(/[\s,.;!?。；！？、\n]+/).filter((w: string) => w.length > 1)
-      const chineseChars = message.replace(/[^一-鿿]/g, '')
-      const ngrams: string[] = []
-      for (let i = 0; i < chineseChars.length - 1; i++) {
-        ngrams.push(chineseChars.slice(i, i + 2))
-        if (i < chineseChars.length - 2) ngrams.push(chineseChars.slice(i, i + 3))
-      }
-      const allTokens = [...new Set([...words, ...ngrams])].slice(0, 20)
-      let relevant: any[] = []
-      if (allTokens.length > 0) {
-        const ftsQuery = allTokens.map(t => `"${t}"`).join(' OR ')
+      const words = message.toLowerCase().split(/[\s,.;!?。；！？、\n]+/).filter((w: string) => w.length > 1).slice(0, 10)
+      if (words.length > 0) {
+        const ftsQuery = words.map((t: string) => `"${t}"`).join(' OR ')
         const ftsResults = memoryFtsSearch(ftsQuery, 5)
-        if (ftsResults.length > 0) relevant = ftsResults.map(r => ({ content: r.content, category: r.category }))
-      }
-      if (relevant.length === 0) {
-        const scored = memories.map((m: any) => {
-          const content = m.content.toLowerCase()
-          let score = 0
-          for (const t of allTokens) { if (t.length > 1 && content.includes(t)) score++ }
-          return { m, score }
-        }).filter((s: any) => s.score > 0)
-        scored.sort((a: any, b: any) => b.score - a.score || (b.m.importance || 0.5) - (a.m.importance || 0.5))
-        relevant = scored.slice(0, 5).map((s: any) => s.m)
-      }
-      if (relevant.length > 0) {
-        const memContext = relevant.map((m: any) => `- ${m.content}`).join('\n')
-        msgs.push({ role: 'system', content: `Key memories:\n${memContext}` })
-      }
-    }
-    // Auto-inject relevant RAG knowledge base content
-    const ragDocs = cacheRag()
-    if (ragDocs.length > 0) {
-      const msgLower2 = message.toLowerCase()
-      const qWords = msgLower2.split(/[\s,.;!?。；！？、\n]+/).filter((w: string) => w.length > 1)
-      const ragResults: { text: string; score: number }[] = []
-      for (const doc of ragDocs) {
-        const content = doc.content || ''
-        const chunks = content.match(/[\s\S]{1,500}/g) || [content]
-        for (const chunk of chunks) {
-          const chunkLower = chunk.toLowerCase()
-          const matchCount = qWords.filter((w: string) => chunkLower.includes(w)).length
-          if (matchCount === 0) continue
-          const score = matchCount / Math.max(1, qWords.length)
-          ragResults.push({ text: chunk.trim(), score })
+        if (ftsResults.length > 0) {
+          msgs.push({ role: 'system', content: `Key memories:\n${ftsResults.map((r: any) => `- ${r.content}`).join('\n')}` })
+        } else {
+          // JS fallback — single pass score
+          const scored = memories.map((m: any) => {
+            const lc = m.content.toLowerCase()
+            return { m, score: words.filter((w: string) => lc.includes(w)).length }
+          }).filter((s: any) => s.score > 0).sort((a: any, b: any) => b.score - a.score)
+          if (scored.length > 0) {
+            msgs.push({ role: 'system', content: `Key memories:\n${scored.slice(0, 5).map((s: any) => `- ${s.m.content}`).join('\n')}` })
+          }
         }
       }
-      ragResults.sort((a, b) => b.score - a.score)
-      const topRag = ragResults.slice(0, 3)
-      if (topRag.length > 0 && topRag[0].score >= 0.3) {
-        const ragContext = topRag.map(r => r.text).join('\n\n---\n\n')
-        msgs.push({ role: 'system', content: `Relevant knowledge base:\n${ragContext}` })
+    }
+    // Auto-inject relevant RAG knowledge base content (pre-chunked, limited scan)
+    const ragDocs = cacheRag()
+    if (ragDocs.length > 0) {
+      const qWords = message.toLowerCase().split(/[\s,.;!?。；！？、\n]+/).filter((w: string) => w.length > 1)
+      if (qWords.length > 0) {
+        const ragResults: { text: string; score: number }[] = []
+        const scanLimit = Math.min(ragDocs.length, 20) // cap at 20 docs per query
+        for (let d = 0; d < scanLimit; d++) {
+          const content = ragDocs[d].content || ''
+          if (!content) continue
+          // Quick pre-filter: skip doc if no query word appears at all
+          const contentLower = content.toLowerCase()
+          if (!qWords.some((w: string) => contentLower.includes(w))) continue
+          // Split into chunks (first 500 chars each, max 5 chunks per doc)
+          const chunks: string[] = []
+          for (let i = 0; i < content.length && chunks.length < 5; i += 500) {
+            chunks.push(content.slice(i, i + 500))
+          }
+          for (const chunk of chunks) {
+            const chunkLower = chunk.toLowerCase()
+            const matchCount = qWords.filter((w: string) => chunkLower.includes(w)).length
+            if (matchCount > 0) {
+              ragResults.push({ text: chunk.trim(), score: matchCount / qWords.length })
+            }
+          }
+        }
+        ragResults.sort((a, b) => b.score - a.score)
+        const topRag = ragResults.slice(0, 3)
+        if (topRag.length > 0 && topRag[0].score >= 0.3) {
+          msgs.push({ role: 'system', content: `Relevant knowledge base:\n${topRag.map(r => r.text).join('\n\n---\n\n')}` })
+        }
       }
     }
     // P2-3: Decision analysis template injection
@@ -1438,8 +1440,9 @@ function setupIPC() {
               }
             } catch {}
           }
-          // Performance: compress large results before adding to context
-          const compressedResult = compressToolResult(tc.function.name, correctedResult)
+          // Translate technical errors to user-friendly Chinese + compress large results
+          const translatedResult = translateError(correctedResult)
+          const compressedResult = compressToolResult(tc.function.name, translatedResult)
           const truncatedContent = compressedResult.length > 30000
             ? compressedResult.slice(0, 30000) + '\n[... truncated, total ' + compressedResult.length + ' chars]'
             : compressedResult
@@ -1612,7 +1615,8 @@ function setupIPC() {
             const correctedResult = wrapToolResult(toolResult, tc.function.name)
             const chainOutput = toolResult.length > 500 ? toolResult.slice(0, 500) + '...' : toolResult
             notifyToolCall(mw, { id: tc.id, name: tc.function.name }, isError ? 'error' : 'done', chainOutput)
-            const compressedChain = compressToolResult(tc.function.name, correctedResult)
+            const translatedChain = translateError(correctedResult)
+            const compressedChain = compressToolResult(tc.function.name, translatedChain)
             const truncatedContent = compressedChain.length > 30000
               ? compressedChain.slice(0, 30000) + '\n[... truncated, total ' + compressedChain.length + ' chars]'
               : compressedChain

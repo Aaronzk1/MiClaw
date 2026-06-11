@@ -172,26 +172,35 @@ export function killAllProcesses() {
 function asyncExec(command: string, opts: { timeout?: number; windowsHide?: boolean; encoding?: string } = {}): Promise<string> {
   const timeout = opts.timeout || 30000
   const startTime = Date.now()
-  return new Promise((resolve, reject) => {
+  return new Promise((resolve) => {
+    let resolved = false
+    const safeResolve = (val: string) => { if (!resolved) { resolved = true; resolve(val) } }
     const proc = exec(command, { timeout, windowsHide: opts.windowsHide !== false, encoding: (opts.encoding || 'utf8') as any, maxBuffer: 10 * 1024 * 1024 }, (err, stdout, stderr) => {
       runningProcesses.delete(proc)
       const elapsed = Date.now() - startTime
       if (err) {
         const isTimeout = (err as any).killed || elapsed >= timeout - 100
         if (isTimeout) {
-          // Track timeout events
           const existing = toolStats.get('__timeout__') || { calls: 0, successes: 0, qualitySum: 0, qualityCount: 0, lastError: '', lastUsed: 0, totalTime: 0 }
           existing.calls++
           existing.lastError = `Timeout after ${elapsed}ms: ${command.slice(0, 100)}`
           existing.lastUsed = Date.now()
           toolStats.set('__timeout__', existing)
         }
-        resolve(stdout?.toString()?.slice(0, 10000) || stderr?.toString()?.slice(0, 10000) || (isTimeout ? `[ERROR] Command timed out after ${Math.round(elapsed / 1000)}s` : err.message))
+        safeResolve(stdout?.toString()?.slice(0, 10000) || stderr?.toString()?.slice(0, 10000) || (isTimeout ? `[ERROR] Command timed out after ${Math.round(elapsed / 1000)}s` : err.message))
       } else {
-        resolve((stdout || '').toString().slice(0, 10000))
+        safeResolve((stdout || '').toString().slice(0, 10000))
       }
     })
     runningProcesses.add(proc)
+    // Safety: force-kill after 2x timeout if callback never fires
+    setTimeout(() => {
+      if (!resolved) {
+        try { proc.kill('SIGKILL') } catch {}
+        runningProcesses.delete(proc)
+        safeResolve(`[ERROR] Command force-killed after ${Math.round(timeout * 2 / 1000)}s`)
+      }
+    }, timeout * 2)
   })
 }
 
@@ -243,6 +252,55 @@ export function isPathAllowed(filePath: string): boolean {
 function sanitizeCommand(cmd: string): string | null {
   if (BLOCKED_COMMANDS.some(re => re.test(cmd))) return null
   return cmd
+}
+
+// User-friendly error translation — converts technical errors to readable Chinese
+const ERROR_TRANSLATIONS: Array<{ pattern: RegExp; msg: string }> = [
+  { pattern: /No path provided/i, msg: '未提供文件路径' },
+  { pattern: /No command provided/i, msg: '未提供命令' },
+  { pattern: /No query provided/i, msg: '未提供搜索内容' },
+  { pattern: /No URL provided/i, msg: '未提供网址' },
+  { pattern: /No keyword provided/i, msg: '未提供关键词' },
+  { pattern: /No stock code provided/i, msg: '未提供股票代码' },
+  { pattern: /No city provided/i, msg: '未提供城市名' },
+  { pattern: /No claim to verify/i, msg: '未提供要验证的内容' },
+  { pattern: /No indicator provided/i, msg: '未提供指标名称' },
+  { pattern: /No task description/i, msg: '未提供任务描述' },
+  { pattern: /No decision question/i, msg: '未提供决策问题' },
+  { pattern: /No content provided/i, msg: '未提供内容' },
+  { pattern: /No text provided/i, msg: '未提供文本' },
+  { pattern: /No project objective/i, msg: '未提供项目目标' },
+  { pattern: /Access denied/i, msg: '访问被拒绝：路径不在允许范围内' },
+  { pattern: /File not found/i, msg: '文件不存在' },
+  { pattern: /Command blocked by security/i, msg: '命令被安全策略阻止' },
+  { pattern: /Stock not found/i, msg: '未找到该股票' },
+  { pattern: /Exchange rate not found/i, msg: '未找到汇率数据' },
+  { pattern: /Weather data not found/i, msg: '未找到天气数据' },
+  { pattern: /IP lookup failed/i, msg: 'IP查询失败' },
+  { pattern: /Only http\/https URLs allowed/i, msg: '仅支持http/https网址' },
+  { pattern: /Invalid URL/i, msg: '无效的网址' },
+  { pattern: /Unknown tool/i, msg: '未知工具' },
+  { pattern: /ENOENT|no such file/i, msg: '文件或目录不存在' },
+  { pattern: /EACCES|permission denied/i, msg: '没有访问权限' },
+  { pattern: /ECONNREFUSED/i, msg: '连接被拒绝，服务可能未运行' },
+  { pattern: /ETIMEDOUT|timed out/i, msg: '操作超时' },
+  { pattern: /ENOTFOUND/i, msg: '无法解析域名' },
+]
+
+export function translateError(result: string): string {
+  if (!result.startsWith('{') || !result.includes('"error"')) return result
+  try {
+    const parsed = JSON.parse(result)
+    if (!parsed.error) return result
+    const errStr = String(parsed.error)
+    for (const t of ERROR_TRANSLATIONS) {
+      if (t.pattern.test(errStr)) {
+        parsed.error = t.msg
+        return JSON.stringify(parsed)
+      }
+    }
+  } catch {}
+  return result
 }
 
 export async function executeTool(name: string, args: any): Promise<string> {
@@ -755,7 +813,7 @@ ${code}
         return JSON.stringify({ error: `Unknown tool: ${name}` })
       }
     }
-  } catch (e) { return JSON.stringify({ error: (e as Error).message }) }
+  } catch (e) { return translateError(JSON.stringify({ error: (e as Error).message })) }
 }
 
 // ══════════ Parameter Pre-Validation ══════════

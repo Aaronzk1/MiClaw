@@ -22,5 +22,15 @@ export default defineConfig({
     }]),
     electronRenderer()
   ],
-  resolve: { alias: { '@': resolve(__dirname, 'src') } }
+  resolve: { alias: { '@': resolve(__dirname, 'src') } },
+  build: {
+    rollupOptions: {
+      output: {
+        manualChunks: {
+          'markdown': ['react-markdown', 'remark-gfm', 'remark-math', 'rehype-katex', 'rehype-highlight', 'highlight.js'],
+          'katex': ['katex'],
+        }
+      }
+    }
+  }
 })

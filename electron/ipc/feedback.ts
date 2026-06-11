@@ -320,28 +320,20 @@ function extractEntities(message: string): void {
 }
 
 // P3-1: Knowledge graph query — find entities and relations relevant to a message
-export function queryKnowledgeGraph(message: string): { entities: string[]; relations: string[] } {
-  const allMemories = kvList('memory')
-  const entities = allMemories.filter((m: any) => m.category === 'entity')
+// Optional `entityMemories` param: pre-filtered entity array from caller to avoid re-loading DB
+export function queryKnowledgeGraph(message: string, entityMemories?: any[]): { entities: string[]; relations: string[] } {
+  const entities = entityMemories || kvList('memory').filter((m: any) => m.category === 'entity')
   const lower = message.toLowerCase()
-
-  // Find matching entities
   const matchedEntities: string[] = []
   const matchedRelations: string[] = []
   for (const e of entities) {
     const content = (e.content || '').toLowerCase()
-    // Check if entity content shares keywords with message
     const words = content.split(/[\s:：,，、]+/).filter((w: string) => w.length > 1)
-    const matchCount = words.filter((w: string) => lower.includes(w)).length
-    if (matchCount > 0) {
-      if (content.startsWith('关系:')) {
-        matchedRelations.push(e.content)
-      } else {
-        matchedEntities.push(e.content)
-      }
+    if (words.some((w: string) => lower.includes(w))) {
+      if (content.startsWith('关系:')) matchedRelations.push(e.content)
+      else matchedEntities.push(e.content)
     }
   }
-
   return {
     entities: [...new Set(matchedEntities)].slice(0, 5),
     relations: [...new Set(matchedRelations)].slice(0, 5),

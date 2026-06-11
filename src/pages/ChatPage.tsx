@@ -1,4 +1,4 @@
-﻿import { useEffect, useState, useRef, useCallback, useMemo } from 'react'
+import { useEffect, useState, useRef, useCallback, useMemo } from 'react'
 import { useAppStore } from '../stores/appStore'
 import { api } from '../lib/ipc'
 import { AlertModal } from '../components/ui'
@@ -188,8 +188,7 @@ export function ChatPage() {
       const files = e.dataTransfer?.files
       if (!files?.length) return
       for (const file of Array.from(files)) {
-        const r = await api.capDocExtract((file as any).path)
-        if (r.ok) addMessage({ role: 'user', content: '[File] ' + (r.filename || file.name) + '\n\n' + (r.content || '').slice(0, 3000), timestamp: new Date().toISOString() })
+        try { const r = await api.capDocExtract((file as any).path); if (r.ok) addMessage({ role: 'user', content: '[File] ' + (r.filename || file.name) + '\n\n' + (r.content || '').slice(0, 3000), timestamp: new Date().toISOString() }) } catch {}
       }
     }
     container.addEventListener('dragover', onDragOver)
@@ -206,7 +205,7 @@ export function ChatPage() {
     if (textareaRef.current) textareaRef.current.style.height = '44px'
     let convId = currentConvId
     if (!convId) {
-      convId = await api.convCreate(msg.slice(0, 50), undefined, currentAgent?.id)
+      try {       try { convId = await api.convCreate(msg.slice(0, 50), undefined, currentAgent?.id) } catch { setStreaming(false); return } } catch { setStreaming(false); return }
       skipConvEffectRef.current = true
       setCurrentConvId(convId)
       localStorage.setItem('lastConvId', convId)
@@ -260,16 +259,18 @@ export function ChatPage() {
     e.target.style.height = newHeight + 'px'
   }
 
-  const copyMessage = (content: string) => navigator.clipboard.writeText(content)
+  const copyMessage = (content: string) => navigator.clipboard.writeText(content).catch(() => {})
 
   const handleTts = async (text: string, msgId: string) => {
     setPlayingTts(msgId)
-    const r = await api.capTts(text)
-    if (r.ok && r.path) {
-      const audio = new Audio('file:///' + r.path.replace(/\\/g, '/'))
-      audio.play()
-      audio.onended = () => setPlayingTts(null)
-    } else { setPlayingTts(null) }
+    try {
+      const r = await api.capTts(text)
+      if (r.ok && r.path) {
+        const audio = new Audio('file:///' + r.path.replace(/\\/g, '/'))
+        audio.play()
+        audio.onended = () => setPlayingTts(null)
+      } else { setPlayingTts(null) }
+    } catch { setPlayingTts(null) }
   }
 
   const regenerate = async () => {
@@ -291,12 +292,14 @@ export function ChatPage() {
 
   const handleFork = async (idx: number) => {
     if (!currentConvId) return
-    const newId = await api.convFork?.(currentConvId, idx)
-    if (newId) {
-      setCurrentConvId(newId)
-      api.convMessages(newId).then(setMessages)
-      api.convList().then(setConversations)
-    }
+    try {
+      const newId = await api.convFork?.(currentConvId, idx)
+      if (newId) {
+        setCurrentConvId(newId)
+        api.convMessages(newId).then(setMessages).catch(() => {})
+        api.convList().then(setConversations).catch(() => {})
+      }
+    } catch {}
   }
 
   const handleEditMessage = (idx: number, content: string) => { setEditingIdx(idx); setEditText(content) }
@@ -308,7 +311,7 @@ export function ChatPage() {
     if (messages[idx].role === 'user') {
       setStreaming(true); resetStream()
       const history = truncated.slice(0, -1).map(m => { const h: any = { role: m.role, content: m.content }; if (m.tool_calls) { try { const parsed = JSON.parse(m.tool_calls); h.tool_calls = Array.isArray(parsed) ? parsed.filter((tc: any) => tc?.function?.name) : parsed } catch {} } if (m.tool_call_id) h.tool_call_id = m.tool_call_id; return h })
-      await api.chatSend({ message: editText, history, model: config.ai?.model || currentAgent?.model, agentId: currentAgent?.id, convId: currentConvId || undefined })
+      try { await api.chatSend({ message: editText, history, model: config.ai?.model || currentAgent?.model, agentId: currentAgent?.id, convId: currentConvId || undefined }) } catch { setStreaming(false) }
     }
   }
 
@@ -321,7 +324,7 @@ export function ChatPage() {
       mediaRecorder.ondataavailable = async (e) => {
         if (e.data.size > 0) {
           const reader = new FileReader()
-          reader.onloadend = async () => { const base64 = (reader.result as string).split(',')[1]; await api.voiceChunk(base64) }
+          reader.onloadend = async () => { const base64 = (reader.result as string).split(',')[1]; try { await api.voiceChunk(base64) } catch {} }
           reader.readAsDataURL(e.data)
         }
       }
@@ -333,8 +336,10 @@ export function ChatPage() {
     mediaRecorderRef.current?.stop()
     mediaRecorderRef.current?.stream.getTracks().forEach(t => t.stop())
     setIsRecording(false)
-    const result = await api.voiceStop()
-    if (result.ok && result.text) setInput(prev => prev + result.text)
+    try {
+      const result = await api.voiceStop()
+      if (result.ok && result.text) setInput(prev => prev + result.text)
+    } catch {}
   }
 
   const handleInputTool = async (tool: string) => {
@@ -342,7 +347,7 @@ export function ChatPage() {
     else if (tool === '记忆') setShowMemoryModal(true)
     else if (tool === '附件') {
       const el = document.createElement('input'); el.type = 'file'; el.accept = '.txt,.md,.json,.csv,.py,.js,.ts,.html,.css,.pdf'
-      el.onchange = async () => { const file = el.files?.[0]; if (!file) return; const r = await api.capDocExtract(file.path); if (r.ok) addMessage({ role: 'user', content: '[File] ' + (r.filename || file.name) + '\n\n' + (r.content || '').slice(0, 2000), timestamp: new Date().toISOString() }) }
+      el.onchange = async () => { const file = el.files?.[0]; if (!file) return; try { const r = await api.capDocExtract(file.path); if (r.ok) addMessage({ role: 'user', content: '[File] ' + (r.filename || file.name) + '\n\n' + (r.content || '').slice(0, 2000), timestamp: new Date().toISOString() }) } catch {} }
       el.click()
     }
   }
@@ -457,11 +462,11 @@ export function ChatPage() {
           <div className="modal" onClick={e => e.stopPropagation()}>
             <div className="modal-header"><h3>搜索网页</h3></div>
             <div className="modal-body">
-              <div className="form-group"><label>搜索内容</label><input value={searchInput} onChange={e => setSearchInput(e.target.value)} onKeyDown={e => { if (e.key === 'Enter') { setShowSearchModal(false); const q = searchInput; setSearchInput(''); addMessage({ role: 'user', content: '搜索: ' + q, timestamp: new Date().toISOString() }); api.capWebSearch(q).then(r => { if (r.ok) addMessage({ role: 'assistant', content: r.results || '无结果', timestamp: new Date().toISOString() }) }) } }} placeholder="输入搜索关键词..." /></div>
+              <div className="form-group"><label>搜索内容</label><input value={searchInput} onChange={e => setSearchInput(e.target.value)} onKeyDown={e => { if (e.key === 'Enter') { setShowSearchModal(false); const q = searchInput; setSearchInput(''); addMessage({ role: 'user', content: '搜索: ' + q, timestamp: new Date().toISOString() }); api.capWebSearch(q).then(r => { if (r.ok) addMessage({ role: 'assistant', content: r.results || '无结果', timestamp: new Date().toISOString() }) }).catch(() => {}) } }} placeholder="输入搜索关键词..." /></div>
             </div>
             <div className="modal-footer">
               <button className="btn btn-secondary" onClick={() => setShowSearchModal(false)}>取消</button>
-              <button className="btn btn-primary" onClick={() => { setShowSearchModal(false); const q = searchInput; setSearchInput(''); addMessage({ role: 'user', content: '搜索: ' + q, timestamp: new Date().toISOString() }); api.capWebSearch(q).then(r => { if (r.ok) addMessage({ role: 'assistant', content: r.results || '无结果', timestamp: new Date().toISOString() }) }) }}>搜索</button>
+              <button className="btn btn-primary" onClick={() => { setShowSearchModal(false); const q = searchInput; setSearchInput(''); addMessage({ role: 'user', content: '搜索: ' + q, timestamp: new Date().toISOString() }); api.capWebSearch(q).then(r => { if (r.ok) addMessage({ role: 'assistant', content: r.results || '无结果', timestamp: new Date().toISOString() }) }).catch(() => {}) }}>搜索</button>
             </div>
           </div>
         </div>
@@ -476,7 +481,7 @@ export function ChatPage() {
             </div>
             <div className="modal-footer">
               <button className="btn btn-secondary" onClick={() => setShowMemoryModal(false)}>取消</button>
-              <button className="btn btn-primary" onClick={() => { if (memoryInput.trim()) { api.memoryAdd(memoryInput, 'general').then(() => addMessage({ role: 'assistant', content: '已添加到记忆: ' + memoryInput.slice(0, 50), timestamp: new Date().toISOString() })); setMemoryInput(''); setShowMemoryModal(false) } }}>添加</button>
+              <button className="btn btn-primary" onClick={() => { if (memoryInput.trim()) { api.memoryAdd(memoryInput, 'general').then(() => addMessage({ role: 'assistant', content: '已添加到记忆: ' + memoryInput.slice(0, 50), timestamp: new Date().toISOString() })).catch(() => {}); setMemoryInput(''); setShowMemoryModal(false) } }}>添加</button>
             </div>
           </div>
         </div>

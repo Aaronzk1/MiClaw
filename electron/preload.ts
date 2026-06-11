@@ -1,4 +1,4 @@
-﻿import { contextBridge, ipcRenderer } from 'electron'
+import { contextBridge, ipcRenderer } from 'electron'
 
 console.log('[AaronClaw] Build v3.0.0-hotfix-' + Date.now())
 
@@ -46,6 +46,11 @@ contextBridge.exposeInMainWorld('api', {
   mcpTools: () => ipcRenderer.invoke('mcp:tools'),
   mcpStatus: (id: string) => ipcRenderer.invoke('mcp:status', id),
   toolsHealth: () => ipcRenderer.invoke('tools:health'),
+  toolsStats: () => ipcRenderer.invoke('tools:stats'),
+  toolsReliable: () => ipcRenderer.invoke('tools:reliable'),
+  toolsUnreliable: () => ipcRenderer.invoke('tools:unreliable'),
+  patternsTop: (limit?: number) => ipcRenderer.invoke('patterns:top', limit),
+  skillsValidate: (execute: string) => ipcRenderer.invoke('skills:validate', execute),
   generatedFilesList: () => ipcRenderer.invoke('generatedFiles:list'),
   generatedFilesDelete: (id: string) => ipcRenderer.invoke('generatedFiles:delete', id),
   generatedFilesClear: () => ipcRenderer.invoke('generatedFiles:clear'),

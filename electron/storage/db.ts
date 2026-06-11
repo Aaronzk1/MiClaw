@@ -50,6 +50,28 @@ export function initDB(dataDir: string): Database.Database {
   try { db.exec('ALTER TABLE messages ADD COLUMN pinned INTEGER DEFAULT 0') } catch {}
   try { db.exec('ALTER TABLE gc_messages ADD COLUMN bookmarked INTEGER DEFAULT 0') } catch {}
   try { db.exec('ALTER TABLE gc_messages ADD COLUMN pinned INTEGER DEFAULT 0') } catch {}
+  try { db.exec('ALTER TABLE messages ADD COLUMN tool_calls TEXT') } catch {}
+  try { db.exec('ALTER TABLE messages ADD COLUMN thinking TEXT') } catch {}
+  try { db.exec('ALTER TABLE messages ADD COLUMN tool_call_id TEXT') } catch {}
+  // FTS5 for memory full-text search
+  try {
+    db.exec(`CREATE VIRTUAL TABLE IF NOT EXISTS memory_fts USING fts5(id, content, category, tokenize='unicode61')`)
+    // Only backfill if FTS table is empty
+    const ftsCount = (db.prepare('SELECT COUNT(*) as c FROM memory_fts').get() as any)?.c || 0
+    if (ftsCount === 0) {
+      const existing = db.prepare("SELECT data FROM kv WHERE ns = 'memory'").all() as any[]
+      const insert = db.prepare('INSERT OR REPLACE INTO memory_fts (id, content, category) VALUES (?, ?, ?)')
+      const tx = db.transaction((rows: any[]) => {
+        for (const row of rows) {
+          try {
+            const d = JSON.parse(row.data)
+            insert.run(d.id, d.content || '', d.category || 'general')
+          } catch {}
+        }
+      })
+      tx(existing)
+    }
+  } catch (e) { console.error('[DB] FTS5 init failed:', (e as Error).message) }
   return db
 }
 
@@ -76,7 +98,7 @@ export function validateId(id: string): string {
 export function validateNs(ns: string): string {
   const allowed = ['agents', 'providers', 'models', 'skills', 'memory', 'cron', 'mcp',
     'groups', 'conversations', 'config', 'settings', 'drafts', 'prompts',
-    'documents', 'embeddings', 'workflows']
+    'documents', 'embeddings', 'workflows', 'rag', 'rag_history', 'cron_history']
   if (!allowed.includes(ns)) throw new Error(`Invalid namespace: ${ns}`)
   return ns
 }
@@ -134,16 +156,16 @@ export function kvUpsertMany(ns: string, items: any[], idKey = 'id') {
 // ─── Messages ───
 export function msgList(convId: string) {
   validateId(convId)
-  return getDB().prepare('SELECT role, content, timestamp, tokens, pinned FROM messages WHERE conv_id = ? ORDER BY rowid').all(convId)
+  return getDB().prepare('SELECT role, content, timestamp, tokens, pinned, tool_calls, thinking, tool_call_id FROM messages WHERE conv_id = ? ORDER BY rowid').all(convId)
 }
 
-export function msgAdd(convId: string, role: string, content: string, tokens = 0): string {
+export function msgAdd(convId: string, role: string, content: string, tokens = 0, toolCalls?: string, thinking?: string, toolCallId?: string): string {
   validateId(convId)
-  if (!['user', 'assistant', 'system'].includes(role)) throw new Error('Invalid role')
+  if (!['user', 'assistant', 'system', 'tool'].includes(role)) throw new Error('Invalid role')
   if (content.length > 500000) throw new Error('Message too large')
   const id = 'msg-' + Date.now() + '-' + randomUUID().slice(0, 8)
   transaction(() => {
-    getDB().prepare('INSERT INTO messages (id, conv_id, role, content, tokens) VALUES (?, ?, ?, ?, ?)').run(id, convId, role, content, tokens)
+    getDB().prepare('INSERT INTO messages (id, conv_id, role, content, tokens, tool_calls, thinking, tool_call_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)').run(id, convId, role, content, tokens, toolCalls || null, thinking || null, toolCallId || null)
     getDB().prepare('UPDATE kv SET updated_at = datetime(\'now\') WHERE ns = ? AND id = ?').run('conversations', convId)
   })
   return id
@@ -204,11 +226,35 @@ export function gcMsgPinned(groupId: string) {
   return getDB().prepare('SELECT id, sender_name as senderName, content FROM gc_messages WHERE group_id = ? AND pinned = 1 ORDER BY rowid DESC LIMIT 3').all(groupId)
 }
 
+export function gcMsgDeleteByGroup(groupId: string) {
+  validateId(groupId)
+  getDB().prepare('DELETE FROM gc_messages WHERE group_id = ?').run(groupId)
+}
+
 export function gcMsgSearch(groupId: string, query: string) {
   validateId(groupId)
-  return getDB().prepare('SELECT id, sender_name as senderName, content, timestamp FROM gc_messages WHERE group_id = ? AND content LIKE ? ORDER BY rowid DESC LIMIT 20').all(groupId, `%${query}%`)
+  const safe = query.replace(/[%_]/g, '\\$&')
+  return getDB().prepare("SELECT id, sender_name as senderName, content, timestamp FROM gc_messages WHERE group_id = ? AND content LIKE ? ESCAPE '\\' ORDER BY rowid DESC LIMIT 20").all(groupId, `%${safe}%`)
 }
 
 export function searchMessages(query: string, limit = 20) {
   return getDB().prepare('SELECT conv_id as convId, role, content, timestamp FROM messages WHERE content LIKE ? ORDER BY rowid DESC LIMIT ?').all(`%${query}%`, limit)
+}
+
+// ─── Memory FTS5 ───
+export function memoryFtsUpsert(id: string, content: string, category: string) {
+  try { getDB().prepare('INSERT OR REPLACE INTO memory_fts (id, content, category) VALUES (?, ?, ?)').run(id, content, category) } catch (e) { console.error('[FTS] upsert failed:', (e as Error).message) }
+}
+
+export function memoryFtsDelete(id: string) {
+  try { getDB().prepare('DELETE FROM memory_fts WHERE id = ?').run(id) } catch (e) { console.error('[FTS] delete failed:', (e as Error).message) }
+}
+
+export function memoryFtsSearch(query: string, limit = 5): Array<{ id: string; content: string; category: string; rank: number }> {
+  try {
+    return getDB().prepare('SELECT id, content, category, rank FROM memory_fts WHERE memory_fts MATCH ? ORDER BY rank LIMIT ?').all(query, limit) as any[]
+  } catch {
+    // Fallback to LIKE if FTS5 query syntax fails
+    return getDB().prepare("SELECT id, content, category, 0 as rank FROM memory_fts WHERE content LIKE ? ORDER BY rowid LIMIT ?").all(`%${query}%`, limit) as any[]
+  }
 }
