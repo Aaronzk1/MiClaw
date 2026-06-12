@@ -18,9 +18,8 @@ const CAT_COLORS: Record<string, string> = {
 }
 
 export function MemoryPage() {
-  const { currentConvId } = useAppStore()
+  const { currentConvId, memories, setMemories } = useAppStore()
   const [tab, setTab] = useState<'overview' | 'memory' | 'context' | 'rag'>('overview')
-  const [memories, setMemories] = useState<any[]>([])
   const [messages, setMessages] = useState<any[]>([])
   const [config, setConfig] = useState<any>({})
   const [models, setModels] = useState<any[]>([])

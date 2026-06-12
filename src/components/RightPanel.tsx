@@ -1,23 +1,27 @@
 import { useEffect, useState, useMemo } from 'react'
 import { useAppStore } from '../stores/appStore'
 import { api } from '../lib/ipc'
+import { ConfirmModal } from './ui'
 
 export function RightPanel() {
-  const { currentConvId, gatewayRunning, setGatewayRunning } = useAppStore()
-  const [agent, setAgent] = useState<any>(null)
-  const [memories, setMemories] = useState<any[]>([])
+  const currentConvId = useAppStore(s => s.currentConvId)
+  const gatewayRunning = useAppStore(s => s.gatewayRunning)
+  const agents = useAppStore(s => s.agents)
+  const setAgents = useAppStore(s => s.setAgents)
+  const currentAgent = useAppStore(s => s.currentAgent)
+  const setCurrentAgent = useAppStore(s => s.setCurrentAgent)
+  const memories = useAppStore(s => s.memories)
+  const setMemories = useAppStore(s => s.setMemories)
   const [config, setConfig] = useState<any>({})
+  const [models, setModels] = useState<any[]>([])
   const [messages, setMessages] = useState<any[]>([])
+  const [showClearConfirm, setShowClearConfirm] = useState(false)
 
   useEffect(() => {
-    api.agentsList().then((a: any[]) => { if (a.length) setAgent(a[0]) }).catch(() => {})
+    if (!agents.length) api.agentsList().then(setAgents).catch(() => {})
     api.memoryList().then(setMemories).catch(() => {})
     api.getConfig().then(setConfig).catch(() => {})
-    api.gatewayStatus().then((s: any) => setGatewayRunning(s.running)).catch(() => {})
-    const timer = setInterval(() => {
-      api.gatewayStatus().then((s: any) => setGatewayRunning(s.running)).catch(() => {})
-    }, 10000)
-    return () => clearInterval(timer)
+    api.modelsList().then(setModels).catch(() => {})
   }, [])
 
   useEffect(() => {
@@ -33,8 +37,10 @@ export function RightPanel() {
   }, [memories])
 
   const ctxUsage = useMemo(() => {
-    const maxCtx = config.ai?.maxTokens || 4096
-    const systemTokens = agent?.systemPrompt ? Math.ceil(agent.systemPrompt.length / 4) : 0
+    const modelId = currentAgent?.model || config.ai?.model || 'openclaw'
+    const model = models.find((m: any) => m.id === modelId)
+    const maxCtx = model?.contextWindow || 128000
+    const systemTokens = currentAgent?.systemPrompt ? Math.ceil(currentAgent.systemPrompt.length / 4) : 0
     const msgTokens = messages.reduce((sum: number, m: any) => sum + (m.tokens || Math.ceil((m.content || '').length / 4)), 0)
     const used = systemTokens + msgTokens
     const free = Math.max(0, maxCtx - used)
@@ -44,44 +50,92 @@ export function RightPanel() {
       tools: 0,
       free,
       total: maxCtx,
-      pctSystem: maxCtx > 0 ? Math.round((systemTokens / maxCtx) * 100) : 0,
-      pctMessages: maxCtx > 0 ? Math.round((msgTokens / maxCtx) * 100) : 0,
-      pctFree: maxCtx > 0 ? Math.round((free / maxCtx) * 100) : 100,
+      pctSystem: maxCtx > 0 ? Math.min(100, Math.round((systemTokens / maxCtx) * 100)) : 0,
+      pctMessages: maxCtx > 0 ? Math.min(100 - Math.min(100, Math.round((systemTokens / maxCtx) * 100)), Math.round((msgTokens / maxCtx) * 100)) : 0,
+      pctFree: maxCtx > 0 ? Math.max(0, 100 - Math.min(100, Math.round((systemTokens / maxCtx) * 100)) - Math.min(100, Math.round((msgTokens / maxCtx) * 100))) : 100,
     }
-  }, [messages, agent, config])
+  }, [messages, currentAgent, config, models])
 
   const handleExport = () => {
     if (!currentConvId) return
     const text = messages.map((m: any) => `[${m.role}] ${m.content}`).join('\n\n')
     const blob = new Blob([text], { type: 'text/plain' })
+    const url = URL.createObjectURL(blob)
     const a = document.createElement('a')
-    a.href = URL.createObjectURL(blob)
+    a.href = url
     a.download = `conversation-${currentConvId.slice(0, 8)}.txt`
     a.click()
+    URL.revokeObjectURL(url)
   }
 
   const handleClear = () => {
     if (!currentConvId) return
-    if (confirm('确认清空当前对话的所有消息？')) {
-      api.convDelete(currentConvId).then(() => {
+    setShowClearConfirm(true)
+  }
+
+  const confirmClear = () => {
+    if (currentConvId) {
+      const cid = currentConvId
+      api.convDelete(cid).then(() => {
         setMessages([])
+        useAppStore.setState(s => ({
+          messages: [],
+          currentConvId: null,
+          conversations: s.conversations.filter((c: any) => c.id !== cid),
+        }))
       })
     }
+    setShowClearConfirm(false)
   }
+
+  const agent = currentAgent || agents[0]
+  const [editing, setEditing] = useState(false)
+  const [editName, setEditName] = useState('')
+  const [editColor, setEditColor] = useState('')
+  const colorPresets = ['#4f46e5', '#ec4899', '#16a34a', '#f59e0b', '#ef4444', '#06b6d4', '#8b5cf6', '#a855f7']
 
   if (!agent) return <div id="right"><div className="rp-section"><h4>加载中...</h4></div></div>
 
+  const startEdit = () => { setEditing(true); setEditName(agent.name || ''); setEditColor(agent.color || '#4f46e5') }
+  const saveEdit = () => {
+    if (!editName.trim()) return
+    const updated = { ...agent, name: editName.trim(), color: editColor, identity: editName.trim() }
+    api.agentsSave(updated).then(() => {
+      useAppStore.getState().setCurrentAgent(updated)
+      setEditing(false)
+    }).catch(() => {})
+  }
+
   return (
-    <div id="right">
+    <div id="right" role="complementary" aria-label="智能体信息面板">
       <div className="rp-header">
-        <div className="rp-avatar">{(agent.name || 'A')[0]}</div>
-        <div style={{ flex: 1 }}>
-          <div style={{ fontWeight: 600, fontSize: 13 }}>{agent.name}</div>
-          <div style={{ fontSize: 11, color: 'var(--text3)' }}>
-            <span className="gw-dot" style={{ background: gatewayRunning ? 'var(--success)' : 'var(--error)', display: 'inline-block', width: 6, height: 6, borderRadius: '50%', marginRight: 4 }}></span>
-            {gatewayRunning ? '运行中' : '未连接'}
+        {editing ? (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 8, padding: '8px 0', width: '100%' }}>
+            <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+              {colorPresets.map(c => <div key={c} onClick={() => setEditColor(c)} style={{ width: 22, height: 22, borderRadius: 6, background: c, cursor: 'pointer', border: editColor === c ? '2px solid var(--text)' : '2px solid transparent' }}></div>)}
+            </div>
+            <input autoFocus value={editName} onChange={e => setEditName(e.target.value)} onKeyDown={e => { if (e.key === 'Enter') saveEdit(); if (e.key === 'Escape') setEditing(false) }}
+              style={{ width: '100%', padding: '4px 8px', fontSize: 12, border: '1px solid var(--accent)', borderRadius: 4, outline: 'none' }} placeholder="Agent 名称" />
+            <div style={{ display: 'flex', gap: 6 }}>
+              <button className="btn btn-sm btn-primary" onClick={saveEdit}>保存</button>
+              <button className="btn btn-sm btn-ghost" onClick={() => setEditing(false)}>取消</button>
+            </div>
           </div>
-        </div>
+        ) : (
+          <>
+            <div className="rp-avatar" style={{ background: agent.color || 'var(--accent)', cursor: 'pointer' }} onClick={startEdit} title="点击编辑名称和颜色">{(agent.name || 'A')[0]}</div>
+            <div style={{ flex: 1 }}>
+              <div style={{ fontWeight: 600, fontSize: 13, display: 'flex', alignItems: 'center', gap: 6 }}>
+                {agent.name}
+                <span style={{ fontSize: 10, color: 'var(--text4)', cursor: 'pointer' }} onClick={startEdit}>✎</span>
+              </div>
+              <div style={{ fontSize: 11, color: 'var(--text3)' }}>
+                <span className="gw-dot" style={{ background: gatewayRunning ? 'var(--success)' : 'var(--error)', display: 'inline-block', width: 6, height: 6, borderRadius: '50%', marginRight: 4 }}></span>
+                {gatewayRunning ? '运行中' : '未连接'}
+              </div>
+            </div>
+          </>
+        )}
       </div>
 
       <div className="rp-section">
@@ -106,12 +160,30 @@ export function RightPanel() {
       </div>
 
       <div className="rp-section">
+        <h4>当前智能体</h4>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+          <div style={{ width: 28, height: 28, borderRadius: 7, background: agent.color || 'var(--accent)', color: '#fff', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 12, fontWeight: 700 }}>{(agent.name || 'A')[0]}</div>
+          <div>
+            <div style={{ fontSize: 12, fontWeight: 600 }}>{agent.name}</div>
+            <div style={{ fontSize: 10, color: 'var(--text4)' }}>{agent.description || ''}</div>
+          </div>
+        </div>
+        {agent.skills?.length > 0 && (
+          <div style={{ display: 'flex', gap: 3, flexWrap: 'wrap', marginTop: 8 }}>
+            {agent.skills.slice(0, 10).map((s: string) => <span key={s} className="badge badge-blue" style={{ fontSize: 9 }}>{s}</span>)}
+            {agent.skills.length > 10 && <span className="badge" style={{ fontSize: 9 }}>+{agent.skills.length - 10}</span>}
+          </div>
+        )}
+      </div>
+
+      <div className="rp-section">
         <h4>快捷操作</h4>
         <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
           <button className="btn btn-sm btn-secondary" onClick={handleExport} disabled={!currentConvId}>导出对话</button>
           <button className="btn btn-sm btn-secondary" onClick={handleClear} disabled={!currentConvId}>清空对话</button>
         </div>
       </div>
+      {showClearConfirm && <ConfirmModal title="清空对话" message="确认清空当前对话的所有消息？" onConfirm={confirmClear} onCancel={() => setShowClearConfirm(false)} danger />}
     </div>
   )
 }

@@ -1,4 +1,4 @@
-﻿export interface IpcResult<T = void> { ok: boolean; data?: T; error?: string }
+export interface IpcResult<T = void> { ok: boolean; data?: T; error?: string }
 
 export interface Conversation { id: string; title: string; model: string; createdAt: string; updatedAt: string; parentConvId?: string; forkPoint?: number }
 export interface Message { role: string; content: string; timestamp?: string; tokens?: number; pinned?: boolean }
@@ -37,6 +37,7 @@ export interface AaronClawAPI {
   convDelete(id: string): Promise<void>
   convMessages(cid: string): Promise<Message[]>
   convSave(cid: string, role: string, content: string): Promise<void>
+  convUpdateTitle(cid: string, title: string): Promise<boolean>
   convFork(convId: string, messageIndex: number): Promise<string | null>
   agentsList(): Promise<Agent[]>
   agentsSave(a: Agent): Promise<void>
@@ -45,6 +46,7 @@ export interface AaronClawAPI {
   providersList(): Promise<Provider[]>
   providersSave(p: Provider): Promise<void>
   providersDelete(id: string): Promise<void>
+  providersToggle(id: string, enabled: boolean): Promise<void>
   modelsList(): Promise<Model[]>
   modelsSave(m: Model): Promise<void>
   modelsDelete(id: string): Promise<void>
@@ -57,12 +59,57 @@ export interface AaronClawAPI {
   memorySearch(q: string): Promise<Memory[]>
   memoryAdd(content: string, category: string): Promise<string>
   memoryDelete(id: string): Promise<void>
+  memorySave(id: string, content: string, category?: string): Promise<boolean>
+  memoryDream(): Promise<{ consolidated: number; removed: number; insights: string[] }>
+  // TTS
+  ttsSpeak(text: string, voice?: string): Promise<{ ok: boolean; error?: string }>
+  ttsVoices(): Promise<Array<{ name: string; lang: string }>>
+  ttsStop(): Promise<{ ok: boolean }>
+  // Permissions
+  permissionsCheck(context: { tool?: string; path?: string; command?: string }): Promise<{ level: 'allow' | 'ask' | 'deny'; rule?: string }>
+  permissionsList(): Promise<Array<{ pattern: string; level: string; scope: string }>>
+  permissionsSave(rule: { pattern: string; level: string; scope: string }): Promise<{ ok: boolean }>
+  // Templates
+  templatesList(): Promise<Array<{ id: string; name: string; description: string; agentId: string; prompt: string; category: string }>>
+  templatesForAgent(agentId: string): Promise<Array<{ id: string; name: string; description: string; prompt: string; category: string }>>
+  templatesSave(template: { id: string; name: string; description: string; agentId: string; prompt: string; category: string }): Promise<{ ok: boolean }>
+  // Computer Use
+  computerScreenshot(region?: { x: number; y: number; width: number; height: number }): Promise<{ ok: boolean; data?: string; error?: string }>
+  computerClick(x: number, y: number, button?: string): Promise<{ ok: boolean; error?: string }>
+  computerType(text: string): Promise<{ ok: boolean; error?: string }>
+  computerScroll(direction: string, amount?: number): Promise<{ ok: boolean; error?: string }>
+  computerScreenSize(): Promise<{ width: number; height: number }>
+  // Browser Agent
+  browserNavigate(url: string): Promise<{ ok: boolean; title?: string; error?: string }>
+  browserGetContent(): Promise<{ ok: boolean; text?: string; title?: string; url?: string; error?: string }>
+  browserClick(selector: string): Promise<{ ok: boolean; error?: string }>
+  browserType(selector: string, text: string): Promise<{ ok: boolean; error?: string }>
+  browserScreenshot(): Promise<{ ok: boolean; data?: string; error?: string }>
+  browserExtractLinks(): Promise<{ ok: boolean; links?: Array<{ text: string; href: string }>; error?: string }>
+  browserClose(): Promise<{ ok: boolean }>
+  // Calendar
+  calendarCreate(event: { title: string; description?: string; startTime: string; endTime?: string; reminder?: number; recurring?: string; category?: string }): Promise<any>
+  calendarList(startDate?: string, endDate?: string): Promise<any[]>
+  calendarUpcoming(): Promise<any[]>
+  calendarToday(): Promise<any[]>
+  calendarUpdate(id: string, updates: any): Promise<{ ok: boolean }>
+  calendarDelete(id: string): Promise<{ ok: boolean }>
+  calendarReminders(minutes?: number): Promise<any[]>
+  // Max Mode
+  maxmodeGenerate(prompt: string, systemPrompt: string, models: string[], temperatures?: number[]): Promise<Array<{ model: string; response: string; temperature: number }>>
+  maxmodeJudge(prompt: string, candidates: Array<{ model: string; response: string; temperature: number }>): Promise<{ best: { model: string; response: string; temperature: number }; reasoning: string }>
+  // Distill
+  distillAnalyze(): Promise<Array<{ id: string; name: string; description: string; pattern: string; frequency: number; confidence: number }>>
+  distillSave(skill: any): Promise<{ ok: boolean }>
+  distillList(): Promise<any[]>
+  distillFromConversation(messages: any[]): Promise<any>
   cronList(): Promise<CronJob[]>
   cronSave(j: CronJob): Promise<void>
   cronDelete(id: string): Promise<void>
-  cronHistory(jobId?: string): Promise<CronExecutionRecord[]>
+
   mcpList(): Promise<McpServer[]>
   mcpSave(s: McpServer): Promise<void>
+  mcpDelete(id: string): Promise<void>
   mcpConnect(id: string): Promise<{ ok: boolean; tools?: any[]; error?: string }>
   mcpDisconnect(id: string): Promise<void>
   mcpCallTool(serverId: string, toolName: string, args: any): Promise<{ ok: boolean; result?: any; error?: string }>
@@ -78,13 +125,15 @@ export interface AaronClawAPI {
   gcUnbookmark(id: string): Promise<void>
   gcBookmarks(gid: string): Promise<any[]>
   gcDelete(id: string): Promise<void>
+  gcClearMessages(gid: string): Promise<boolean>
   gcPin(id: string): Promise<void>
   gcPinned(gid: string): Promise<any[]>
   gatewayStatus(): Promise<GatewayStatus>
   gatewayStart(): Promise<{ ok: boolean; error?: string }>
-  gatewayCircuit(): Promise<CircuitStatus>
-  chatSend(opts: { message: string; history?: any[]; systemPrompt?: string; model?: string; agentId?: string; convId?: string }): Promise<{ ok: boolean; text?: string; error?: string }>
+  chatSend(opts: { message: string; history?: any[]; systemPrompt?: string; model?: string; agentId?: string; convId?: string; devMode?: string }): Promise<{ ok: boolean; text?: string; error?: string }>
   chatCancel(): Promise<boolean>
+  chatCompare(opts: { message: string; modelIds: string[] }): Promise<{ ok: boolean; results: Array<{ model: string; text: string; ok: boolean; error?: string }> }>
+  ollamaStatus(): Promise<{ running: boolean; models: string[] }>
   chatFeedback?(opts: { type: 'regenerate' | 'fork' | 'good'; convId?: string }): Promise<{ ok: boolean }>
   chatDispatch(opts: { message: string; convId?: string }): Promise<{ ok: boolean; mode?: string; text?: string; subTasks?: any[]; error?: string }>
   onDispatchStart(cb: (d: any) => void): void
@@ -111,18 +160,6 @@ export interface AaronClawAPI {
   cryptoEncrypt(text: string): Promise<string>
   cryptoDecrypt(encoded: string): Promise<string>
   notify(title: string, body: string): Promise<void>
-  capTts(text: string, voice?: string): Promise<{ ok: boolean; path?: string; error?: string }>
-  capImageGen(prompt: string, size?: string): Promise<{ ok: boolean; url?: string; revised_prompt?: string; error?: string }>
-  capTranscribe(audioPath: string): Promise<{ ok: boolean; text?: string; error?: string }>
-  capDocExtract(filePath: string): Promise<{ ok: boolean; content?: string; filename?: string; error?: string }>
-  capWebSearch(query: string): Promise<{ ok: boolean; results?: string; error?: string }>
-  capEmbed(text: string): Promise<{ ok: boolean; embedding?: number[]; error?: string }>
-  capPlayAudio(path: string): Promise<{ ok: boolean }>
-  onAudioReady(cb: (path: string) => void): void
-  // Voice
-  voiceStart(): Promise<{ ok: boolean }>
-  voiceChunk(chunk: string): Promise<{ ok: boolean }>
-  voiceStop(): Promise<{ ok: boolean; text?: string; error?: string }>
   // RAG
   ragImport(filePath: string): Promise<{ ok: boolean; id?: string; error?: string }>
   ragList(): Promise<RagDocument[]>
@@ -138,16 +175,17 @@ export interface AaronClawAPI {
   backupCreate(): Promise<BackupMeta | null>
   backupList(): Promise<BackupMeta[]>
   backupRestore(path: string): Promise<boolean>
-  // Prompts
-  promptsList(): Promise<Prompt[]>
-  promptsSave(p: Prompt): Promise<void>
-  promptsDelete(id: string): Promise<void>
   // Search
   searchMessages(query: string, limit?: number): Promise<Array<{ convId: string; role: string; content: string; timestamp: string; convTitle: string }>>
   // Logs
   logsList(): Promise<Array<{ name: string; path: string; size: number }>>
   logsRead(filename: string): Promise<string>
   logsDir(): Promise<string>
+  // Smart collaboration
+  smartAnalyze(message: string): Promise<{ type: string; complexity: string; neededRoles: string[]; suggestedTeam: any[]; description: string }>
+  smartCreateTeam(analysis: any): Promise<string[]>
+  smartBuildWorkflow(message: string, agentIds: string[], analysis: any): Promise<any[]>
+  smartExecuteStep(step: any, groupId: string, previousResults: string[]): Promise<{ ok: boolean; result?: string; error?: string }>
   // Self-evolution
   patternsTop(limit?: number): Promise<Array<{ signature: string; count: number }>>
   toolsStats(): Promise<Record<string, { calls: number; errors: number; successRate: number; qualitySum: number; qualityCount: number }>>
@@ -155,6 +193,14 @@ export interface AaronClawAPI {
   toolsUnreliable(): Promise<string[]>
   toolsHealth(): Promise<Record<string, { status: string; detail?: string }>>
   skillsValidate(id: string): Promise<{ ok: boolean; issues?: string[] }>
+  skillsMarket(): Promise<Array<{ id: string; name: string; description: string; category: string; author: string; version: string; skills: string[]; execute?: string }>>
+  skillsInstallFromMarket(skill: any): Promise<{ ok: boolean; id?: string; error?: string }>
+  skillsImport(content: string, source?: string): Promise<{ ok: boolean; skill?: any; error?: string }>
+  // Background Goals
+  goalsList(): Promise<any[]>
+  goalsCreate(title: string, task: string, steps?: string[]): Promise<any>
+  goalsDelete(id: string): Promise<boolean>
+  goalsExecute(goalId: string): Promise<{ ok: boolean; result?: string; error?: string }>
   // Generated files
   generatedFilesList(): Promise<Array<{ id?: string; path: string; name: string; size: number; tool?: string; createdAt?: string }>>
   generatedFilesDelete(id: string): Promise<void>

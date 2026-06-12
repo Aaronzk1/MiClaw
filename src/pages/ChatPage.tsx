@@ -1,8 +1,27 @@
 import { useEffect, useState, useRef, useCallback, useMemo } from 'react'
 import { useAppStore } from '../stores/appStore'
 import { api } from '../lib/ipc'
+import { toast } from '../components/Toast'
 import { AlertModal } from '../components/ui'
 import { MessageBubble } from '../components/MessageBubble'
+
+function friendlyError(err: string): string {
+  if (!err) return '未知错误，请重试'
+  const e = err.toLowerCase()
+  if (e.includes('timeout') || e.includes('超时')) return '请求超时，网络可能不稳定，请重试'
+  if (e.includes('econnrefused') || e.includes('connection refused')) return '无法连接到服务器，请检查 Gateway 是否运行'
+  if (e.includes('enotfound') || e.includes('getaddrinfo')) return '无法解析域名，请检查网络连接'
+  if (e.includes('401') || e.includes('unauthorized')) return 'API Key 无效或已过期，请在设置中更新'
+  if (e.includes('403') || e.includes('forbidden')) return '访问被拒绝，请检查 API Key 权限'
+  if (e.includes('429') || e.includes('rate limit')) return '请求太频繁，被限速了，请稍后重试'
+  if (e.includes('500') || e.includes('502') || e.includes('503')) return '服务器内部错误，请稍后重试'
+  if (e.includes('network') || e.includes('fetch failed')) return '网络连接失败，请检查网络'
+  if (e.includes('abort') || e.includes('取消')) return '请求已取消'
+  if (e.includes('ipc') || e.includes('invoke')) return '应用通信异常，请重启应用'
+  if (e.includes('tool') && e.includes('fail')) return '工具执行失败，正在自动重试...'
+  if (err.length > 100) return '执行遇到问题，请发送"继续"重试'
+  return err
+}
 
 export function ChatPage() {
   const currentConvId = useAppStore(s => s.currentConvId)
@@ -27,11 +46,10 @@ export function ChatPage() {
   const setModels = useAppStore(s => s.setModels)
   const config = useAppStore(s => s.config)
   const setConfig = useAppStore(s => s.setConfig)
-  const agents = useAppStore(s => s.agents)
-  const setAgents = useAppStore(s => s.setAgents)
-  const currentAgent = useAppStore(s => s.currentAgent)
-  const setCurrentAgent = useAppStore(s => s.setCurrentAgent)
+  const addMemory = useAppStore(s => s.addMemory)
+  const [devMode, setDevMode] = useState<'code' | 'plan' | 'auto'>('code')
   const [gwRunning, setGwRunning] = useState(true)
+  const [hasProvider, setHasProvider] = useState(false)
   const msgEndRef = useRef<HTMLDivElement>(null)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const [replyingTo, setReplyingTo] = useState<{ idx: number; content: string } | null>(null)
@@ -39,8 +57,7 @@ export function ChatPage() {
   const [editText, setEditText] = useState('')
   const [isDragging, setIsDragging] = useState(false)
   const [isRecording, setIsRecording] = useState(false)
-  const [showPromptLib, setShowPromptLib] = useState(false)
-  const [prompts, setPrompts] = useState<any[]>([])
+
   const [showSearchModal, setShowSearchModal] = useState(false)
   const [showMemoryModal, setShowMemoryModal] = useState(false)
   const [showAlert, setShowAlert] = useState<{ message: string } | null>(null)
@@ -66,19 +83,9 @@ export function ChatPage() {
 
   useEffect(() => {
     api.getConfig().then(setConfig).catch(console.error)
-    api.agentsList().then((a: any[]) => {
-      setAgents(a)
-      // Only restore agent if not already set (Sidebar may have already done this)
-      const cur = useAppStore.getState().currentAgent
-      if (!cur && a.length) {
-        const saved = localStorage.getItem('currentAgentId')
-        const found = saved ? a.find((x: any) => x.id === saved) : null
-        setCurrentAgent(found || a[0])
-      }
-    }).catch(console.error)
-    api.gatewayStatus().then((s: any) => setGwRunning(s.running)).catch(() => setGwRunning(false))
     api.modelsList().then((m: any[]) => setModels(m.filter(x => x.enabled !== false))).catch(console.error)
-    api.promptsList?.().then(setPrompts).catch(() => {})
+    api.gatewayStatus().then((s: any) => setGwRunning(s.running)).catch(() => setGwRunning(false))
+    api.providersList().then((p: any[]) => setHasProvider(p.some(x => x.apiKey && x.enabled !== false))).catch(() => {})
   }, [])
 
   useEffect(() => {
@@ -98,8 +105,8 @@ export function ChatPage() {
             setStreaming(true)
             resetStream()
             const history = msgs.slice(-12).map((m: any) => { const h: any = { role: m.role, content: m.content }; if (m.tool_calls) { try { const parsed = JSON.parse(m.tool_calls); h.tool_calls = Array.isArray(parsed) ? parsed.filter((tc: any) => tc?.function?.name) : parsed } catch {} } if (m.tool_call_id) h.tool_call_id = m.tool_call_id; return h })
-            api.chatSend({ message: orphanMsg.content, history, model: config.ai?.model || currentAgent?.model, agentId: currentAgent?.id, convId: currentConvId })
-              .then((result: any) => { if (!result?.ok) { setStreaming(false); addMessage({ role: 'assistant', content: 'Error: ' + (result?.error || '服务无响应'), timestamp: new Date().toISOString() }) } })
+            api.chatSend({ message: orphanMsg.content, history, model: config.ai?.model, agentId: 'default', convId: currentConvId })
+              .then((result: any) => { if (!result?.ok) { setStreaming(false); addMessage({ role: 'assistant', content: friendlyError(result?.error || '服务无响应'), timestamp: new Date().toISOString() }) } })
               .catch(() => setStreaming(false))
           }, 500)
         }
@@ -117,9 +124,11 @@ export function ChatPage() {
 
 
   useEffect(() => {
+    let mounted = true
     let pendingTokenBuf = ''
     let rafScheduled = false
     api.onChatToken((t: string) => {
+      if (!mounted) return
       streamBufRef.current += t
       pendingTokenBuf += t
       if (!rafScheduled) {
@@ -130,35 +139,57 @@ export function ChatPage() {
         })
       }
     })
-    api.onChatThinking((t: string) => appendThink(t))
+    // Batch thinking tokens to reduce re-renders
+    let pendingThinkBuf = ''
+    let rafThinkScheduled = false
+    api.onChatThinking((t: string) => {
+      if (!mounted) return
+      pendingThinkBuf += t
+      if (!rafThinkScheduled) {
+        rafThinkScheduled = true
+        requestAnimationFrame(() => {
+          if (pendingThinkBuf) { appendThink(pendingThinkBuf); pendingThinkBuf = '' }
+          rafThinkScheduled = false
+        })
+      }
+    })
     api.onChatStage((stage: string) => {
+      if (!mounted) return
       if (stage === 'followup') {
-        // Tool results ready, starting follow-up — clear text buffer only, preserve thinking
         const state = useAppStore.getState()
         state.setStreamBuf('')
         streamBufRef.current = ''
+      } else if (stage.startsWith('pressure-')) {
+        const level = parseInt(stage.split('-')[1])
+        if (level >= 2) {
+          addMessage({ role: 'system', content: `⚠️ 上下文压力较高（${level === 2 ? '70%' : '85%'}+），正在自动压缩...`, timestamp: new Date().toISOString() })
+        }
+      } else if (stage === 'compacted') {
+        addMessage({ role: 'system', content: '✅ 上下文已压缩，旧对话已摘要保存', timestamp: new Date().toISOString() })
       }
     })
     api.onChatToolCall((d: any) => {
+      if (!mounted) return
       addToolCall(d)
     })
     api.onChatDone((finalText: string, thinking?: string, toolCalls?: any[]) => {
+      if (!mounted) return
       streamBufRef.current = ''
       const state = useAppStore.getState()
       const streamed = state.streamBuf || ''
       const content = finalText || streamed || ''
-      // Capture streaming tool calls before reset
+      // Capture streaming state BEFORE reset
       const streamedToolCalls = state.toolCalls || []
+      const streamedThinking = state.thinkBuf || ''
       state.resetStream()
       state.setStreaming(false)
       if (!content) return
-      // Use streaming tool calls if backend didn't return any
       const finalToolCalls = toolCalls?.length ? toolCalls : (streamedToolCalls.length ? streamedToolCalls : undefined)
       state.addMessage({
         id: 'stream_' + Date.now(),
         role: 'assistant', content,
         timestamp: new Date().toISOString(),
-        thinking: thinking || undefined,
+        thinking: thinking || streamedThinking || undefined,
         tool_calls: finalToolCalls ? JSON.stringify(finalToolCalls) : undefined,
       })
       // Auto-title short conversations
@@ -175,7 +206,8 @@ export function ChatPage() {
         }
       }
     })
-    api.onChatError(() => setStreaming(false))
+    api.onChatError(() => { if (mounted) setStreaming(false) })
+    return () => { mounted = false }
   }, [])
 
   useEffect(() => {
@@ -188,7 +220,15 @@ export function ChatPage() {
       const files = e.dataTransfer?.files
       if (!files?.length) return
       for (const file of Array.from(files)) {
-        try { const r = await api.capDocExtract((file as any).path); if (r.ok) addMessage({ role: 'user', content: '[File] ' + (r.filename || file.name) + '\n\n' + (r.content || '').slice(0, 3000), timestamp: new Date().toISOString() }) } catch {}
+        try {
+          const reader = new FileReader()
+          reader.onload = () => {
+            const content = typeof reader.result === 'string' ? reader.result : ''
+            const preview = content.slice(0, 3000)
+            setInput(prev => prev + `[文件: ${file.name}]\n\n${preview}${content.length > 3000 ? '\n...(已截断)' : ''}`)
+          }
+          reader.readAsText(file)
+        } catch { setInput(prev => prev + `[文件: ${file.name}]`) }
       }
     }
     container.addEventListener('dragover', onDragOver)
@@ -205,7 +245,7 @@ export function ChatPage() {
     if (textareaRef.current) textareaRef.current.style.height = '44px'
     let convId = currentConvId
     if (!convId) {
-      try {       try { convId = await api.convCreate(msg.slice(0, 50), undefined, currentAgent?.id) } catch { setStreaming(false); return } } catch { setStreaming(false); return }
+      try {       try { convId = await api.convCreate(msg.slice(0, 50), undefined, 'default') } catch { setStreaming(false); return } } catch { setStreaming(false); return }
       skipConvEffectRef.current = true
       setCurrentConvId(convId)
       localStorage.setItem('lastConvId', convId)
@@ -221,23 +261,23 @@ export function ChatPage() {
     resetStream()
     const history = messages.slice(-12).map((m: any) => { const h: any = { role: m.role, content: m.content }; if (m.tool_calls) { try { const parsed = JSON.parse(m.tool_calls); h.tool_calls = Array.isArray(parsed) ? parsed.filter((tc: any) => tc?.function?.name) : parsed } catch {} } if (m.tool_call_id) h.tool_call_id = m.tool_call_id; return h })
     try {
-      const result = await api.chatSend({ message: finalMsg, history, model: config.ai?.model || currentAgent?.model, agentId: currentAgent?.id, convId })
+      const result = await api.chatSend({ message: finalMsg, history, model: config.ai?.model, agentId: 'default', convId, devMode })
       if (!result?.ok) {
         setStreaming(false)
-        const errMsg = result?.error || '服务无响应 — 请检查 OpenClaw Gateway 是否运行'
-        addMessage({ role: 'assistant', content: 'Error: ' + errMsg, timestamp: new Date().toISOString() })
+        const errMsg = result?.error || '服务无响应'
+        addMessage({ role: 'assistant', content: friendlyError(errMsg), timestamp: new Date().toISOString() })
       }
       // Note: on success, setStreaming(false) is called by chat:done event
     } catch (e) {
       setStreaming(false)
       const errMsg = e instanceof Error ? e.message : String(e)
-      addMessage({ role: 'assistant', content: 'Error: ' + (errMsg || 'IPC通信失败 — 请重启应用'), timestamp: new Date().toISOString() })
+      addMessage({ role: 'assistant', content: friendlyError(errMsg), timestamp: new Date().toISOString() })
     }
     // Safety: if streaming is still true after 120s, force reset (prevents stuck UI)
     setTimeout(() => {
       const state = useAppStore.getState()
       if (state.isStreaming) { state.setStreaming(false); state.resetStream() }
-    }, 120000)
+    }, 180000)
   }, [input, isStreaming, currentConvId, messages, config, replyingTo])
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
@@ -246,7 +286,6 @@ export function ChatPage() {
       if (isStreaming) api.chatCancel()
       else if (editingIdx !== null) setEditingIdx(null)
       else if (replyingTo) setReplyingTo(null)
-      else if (showPromptLib) setShowPromptLib(false)
       else if (showSearchModal) setShowSearchModal(false)
       else if (showMemoryModal) setShowMemoryModal(false)
     }
@@ -261,16 +300,8 @@ export function ChatPage() {
 
   const copyMessage = (content: string) => navigator.clipboard.writeText(content).catch(() => {})
 
-  const handleTts = async (text: string, msgId: string) => {
-    setPlayingTts(msgId)
-    try {
-      const r = await api.capTts(text)
-      if (r.ok && r.path) {
-        const audio = new Audio('file:///' + r.path.replace(/\\/g, '/'))
-        audio.play()
-        audio.onended = () => setPlayingTts(null)
-      } else { setPlayingTts(null) }
-    } catch { setPlayingTts(null) }
+  const handleTts = async (text: string, _msgId: string) => {
+    try { await api.ttsSpeak(text) } catch {}
   }
 
   const regenerate = async () => {
@@ -286,8 +317,8 @@ export function ChatPage() {
     setMessages(newMsgs)
     setStreaming(true); resetStream()
     const history = newMsgs.filter((m: any) => m.role !== 'system').slice(-12).map((m: any) => { const h: any = { role: m.role, content: m.content }; if (m.tool_calls) { try { const parsed = JSON.parse(m.tool_calls); h.tool_calls = Array.isArray(parsed) ? parsed.filter((tc: any) => tc?.function?.name) : parsed } catch {} } if (m.tool_call_id) h.tool_call_id = m.tool_call_id; return h })
-    const result = await api.chatSend({ message: lastUser.content, history, model: config.ai?.model || currentAgent?.model, agentId: currentAgent?.id, convId: currentConvId || undefined })
-    if (!result?.ok) { setStreaming(false); addMessage({ role: 'assistant', content: 'Error: ' + (result?.error || 'Unknown'), timestamp: new Date().toISOString() }) }
+      const result = await api.chatSend({ message: lastUser.content, history, model: config.ai?.model, agentId: 'default', convId: currentConvId || undefined, devMode })
+    if (!result?.ok) { setStreaming(false); addMessage({ role: 'assistant', content: friendlyError(result?.error || '生成失败'), timestamp: new Date().toISOString() }) }
   }
 
   const handleFork = async (idx: number) => {
@@ -311,35 +342,41 @@ export function ChatPage() {
     if (messages[idx].role === 'user') {
       setStreaming(true); resetStream()
       const history = truncated.slice(0, -1).map(m => { const h: any = { role: m.role, content: m.content }; if (m.tool_calls) { try { const parsed = JSON.parse(m.tool_calls); h.tool_calls = Array.isArray(parsed) ? parsed.filter((tc: any) => tc?.function?.name) : parsed } catch {} } if (m.tool_call_id) h.tool_call_id = m.tool_call_id; return h })
-      try { await api.chatSend({ message: editText, history, model: config.ai?.model || currentAgent?.model, agentId: currentAgent?.id, convId: currentConvId || undefined }) } catch { setStreaming(false) }
+      try { await api.chatSend({ message: editText, history, model: config.ai?.model, agentId: 'default', convId: currentConvId || undefined }) } catch { setStreaming(false) }
     }
   }
 
   const startRecording = async () => {
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
-      const mediaRecorder = new MediaRecorder(stream, { mimeType: 'audio/webm;codecs=opus' })
-      mediaRecorderRef.current = mediaRecorder
-      await api.voiceStart()
-      mediaRecorder.ondataavailable = async (e) => {
-        if (e.data.size > 0) {
-          const reader = new FileReader()
-          reader.onloadend = async () => { const base64 = (reader.result as string).split(',')[1]; try { await api.voiceChunk(base64) } catch {} }
-          reader.readAsDataURL(e.data)
-        }
+      // Use Web Speech API (supported in Electron/Chrome)
+      const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition
+      if (!SpeechRecognition) {
+        setShowAlert({ message: '此浏览器不支持语音识别' })
+        return
       }
-      mediaRecorder.start(1000)
+      const recognition = new SpeechRecognition()
+      recognition.lang = 'zh-CN'
+      recognition.continuous = false
+      recognition.interimResults = true
+      recognition.onresult = (event: any) => {
+        const transcript = Array.from(event.results).map((r: any) => r[0].transcript).join('')
+        setInput(prev => prev + transcript)
+      }
+      recognition.onend = () => setIsRecording(false)
+      recognition.onerror = (e: any) => {
+        setIsRecording(false)
+        if (e.error !== 'no-speech') setShowAlert({ message: '语音识别错误: ' + e.error })
+      }
+      ;(window as any).__recognition = recognition
+      recognition.start()
       setIsRecording(true)
-    } catch { setShowAlert({ message: '无法访问麦克风，请检查权限设置' }) }
+    } catch (e: any) {
+      setShowAlert({ message: '语音功能不可用: ' + e.message })
+    }
   }
   const stopRecording = async () => {
-    mediaRecorderRef.current?.stop()
-    mediaRecorderRef.current?.stream.getTracks().forEach(t => t.stop())
     setIsRecording(false)
-    try {
-      const result = await api.voiceStop()
-      if (result.ok && result.text) setInput(prev => prev + result.text)
-    } catch {}
+    try { (window as any).__recognition?.stop() } catch {}
   }
 
   const handleInputTool = async (tool: string) => {
@@ -347,7 +384,18 @@ export function ChatPage() {
     else if (tool === '记忆') setShowMemoryModal(true)
     else if (tool === '附件') {
       const el = document.createElement('input'); el.type = 'file'; el.accept = '.txt,.md,.json,.csv,.py,.js,.ts,.html,.css,.pdf'
-      el.onchange = async () => { const file = el.files?.[0]; if (!file) return; try { const r = await api.capDocExtract(file.path); if (r.ok) addMessage({ role: 'user', content: '[File] ' + (r.filename || file.name) + '\n\n' + (r.content || '').slice(0, 2000), timestamp: new Date().toISOString() }) } catch {} }
+      el.onchange = async () => {
+        const file = el.files?.[0]; if (!file) return
+        try {
+          const reader = new FileReader()
+          reader.onload = () => {
+            const content = typeof reader.result === 'string' ? reader.result : ''
+            const preview = content.slice(0, 3000)
+            setInput(prev => prev + `[文件: ${file.name}]\n\n${preview}${content.length > 3000 ? '\n...(已截断)' : ''}`)
+          }
+          reader.readAsText(file)
+        } catch { setInput(prev => prev + `[文件: ${file.name}]`) }
+      }
       el.click()
     }
   }
@@ -381,7 +429,16 @@ export function ChatPage() {
               role={m.role}
               content={m.content}
               thinking={m.thinking}
-              toolCalls={m.tool_calls ? (() => { try { return JSON.parse(m.tool_calls) } catch { return undefined } })() : undefined}
+              toolCalls={m.tool_calls ? (() => { try {
+                const parsed = JSON.parse(m.tool_calls)
+                if (!Array.isArray(parsed)) return undefined
+                return parsed.map((tc: any) => ({
+                  id: tc.id || 'tc_' + Math.random(),
+                  name: tc.name || tc.function?.name || 'unknown',
+                  args: tc.args || tc.function?.arguments || '',
+                  status: tc.status || 'done',
+                }))
+              } catch { return undefined } })() : undefined}
               isStreaming={false}
               onCopy={() => copyMessage(m.content)}
               onEdit={m.role === 'user' ? () => handleEditMessage(i, m.content) : undefined}
@@ -416,7 +473,40 @@ export function ChatPage() {
         <button onClick={() => handleInputTool('附件')}>附件</button>
         <button onClick={() => handleInputTool('搜索')}>搜索</button>
         <button onClick={() => handleInputTool('记忆')}>记忆</button>
-        <button onClick={() => setShowPromptLib(true)}>提示词</button>
+        <div style={{ display: 'flex', gap: 2, marginLeft: 4 }}>
+          {(['plan', 'code', 'auto'] as const).map(m => (
+            <button key={m} onClick={() => setDevMode(m)} style={{ padding: '3px 8px', border: devMode === m ? '1px solid var(--accent)' : '1px solid var(--border)', borderRadius: 10, fontSize: 10, cursor: 'pointer', background: devMode === m ? 'var(--accent-light)' : 'transparent', color: devMode === m ? 'var(--accent)' : 'var(--text3)', fontWeight: devMode === m ? 600 : 400 }}>
+              {m === 'plan' ? '📋 方案' : m === 'code' ? '💻 编码' : '⚡ 自动'}
+            </button>
+          ))}
+        </div>
+        <button onClick={async () => {
+          const templates = await api.templatesForAgent('default')
+          if (templates.length > 0) {
+            // Show template selector popup
+            const popup = document.createElement('div')
+            popup.style.cssText = 'position:fixed;bottom:80px;left:50%;transform:translateX(-50%);background:var(--bg2);border:1px solid var(--border);border-radius:12px;padding:8px;z-index:1000;max-width:400px;max-height:300px;overflow-y:auto;box-shadow:0 8px 24px rgba(0,0,0,.2)'
+            popup.innerHTML = templates.map(t =>
+              `<div style="padding:8px 12px;cursor:pointer;border-radius:8px;font-size:12px;display:flex;gap:8px;align-items:center" onmouseover="this.style.background='var(--bg3)'" onmouseout="this.style.background='transparent'">
+                <span style="font-weight:600;min-width:60px">${t.name}</span>
+                <span style="color:var(--text3);flex:1">${t.description}</span>
+              </div>`
+            ).join('')
+            // Click handler
+            popup.querySelectorAll('div').forEach((div, i) => {
+              div.onclick = () => {
+                setInput(templates[i].prompt)
+                popup.remove()
+              }
+            })
+            // Close on click outside
+            const close = (e: Event) => { if (!popup.contains(e.target as Node)) { popup.remove(); document.removeEventListener('click', close) } }
+            document.body.appendChild(popup)
+            setTimeout(() => document.addEventListener('click', close), 100)
+          } else {
+            toast('暂无模板', 'info')
+          }
+        }} style={{ padding: '4px 10px', border: '1px solid var(--border)', borderRadius: 12, fontSize: 11, cursor: 'pointer', background: 'transparent', color: 'var(--text2)' }}>📝 模板</button>
         <div style={{ flex: 1 }} />
         <div style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 11, color: 'var(--text4)', userSelect: 'none' }}>
           <span>{contextInfo.fmt(contextInfo.used)} / {contextInfo.fmt(contextInfo.total)}</span>
@@ -429,44 +519,19 @@ export function ChatPage() {
 
       <div className="input-area">
         <textarea ref={textareaRef} rows={1} placeholder={isStreaming ? 'AI 思考中...' : '输入消息... (Enter 发送, Shift+Enter 换行)'} value={input} onChange={handleTextareaInput} onKeyDown={handleKeyDown} disabled={isStreaming} />
-        <button className="send-btn" onClick={isRecording ? stopRecording : startRecording}
-          style={{ background: isRecording ? 'var(--error)' : 'var(--bg3)', color: isRecording ? '#fff' : 'var(--text2)', fontSize: 16 }}>
-          {isRecording ? '■' : '🎤'}
-        </button>
-        <button className="send-btn" onClick={isStreaming ? () => api.chatCancel() : handleSend} disabled={!isStreaming && (!input.trim() || !gwRunning)} style={isStreaming ? { background: 'var(--error)' } : undefined}>{isStreaming ? '■' : '➤'}</button>
+        <button className="send-btn" onClick={isStreaming ? () => api.chatCancel() : handleSend} disabled={!isStreaming && !input.trim()} style={isStreaming ? { background: 'var(--error)' } : undefined}>{isStreaming ? '■' : '▲'}</button>
       </div>
-
-      {showPromptLib && (
-        <div className="modal-overlay" onClick={() => setShowPromptLib(false)}>
-          <div className="modal" onClick={e => e.stopPropagation()} style={{ minWidth: 500 }}>
-            <div className="modal-header"><h3>提示词模板库</h3></div>
-            <div className="modal-body" style={{ maxHeight: 400, overflow: 'auto' }}>
-              {prompts.length === 0 && <div style={{ padding: 16, textAlign: 'center', color: 'var(--text4)', fontSize: 12 }}>无模板</div>}
-              {prompts.map(p => (
-                <div key={p.id} className="card" style={{ marginBottom: 8, padding: '10px 14px', cursor: 'pointer' }}
-                  onClick={() => { setInput(p.content); setShowPromptLib(false) }}>
-                  <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 4 }}>
-                    <strong style={{ fontSize: 13 }}>{p.name}</strong>
-                    {p.category && <span className="badge badge-blue">{p.category}</span>}
-                  </div>
-                  <div style={{ fontSize: 12, color: 'var(--text3)', lineHeight: 1.5 }}>{p.content.slice(0, 100)}...</div>
-                </div>
-              ))}
-            </div>
-          </div>
-        </div>
-      )}
 
       {showSearchModal && (
         <div className="modal-overlay" onClick={() => setShowSearchModal(false)}>
           <div className="modal" onClick={e => e.stopPropagation()}>
             <div className="modal-header"><h3>搜索网页</h3></div>
             <div className="modal-body">
-              <div className="form-group"><label>搜索内容</label><input value={searchInput} onChange={e => setSearchInput(e.target.value)} onKeyDown={e => { if (e.key === 'Enter') { setShowSearchModal(false); const q = searchInput; setSearchInput(''); addMessage({ role: 'user', content: '搜索: ' + q, timestamp: new Date().toISOString() }); api.capWebSearch(q).then(r => { if (r.ok) addMessage({ role: 'assistant', content: r.results || '无结果', timestamp: new Date().toISOString() }) }).catch(() => {}) } }} placeholder="输入搜索关键词..." /></div>
+              <div className="form-group"><label>搜索内容</label><input value={searchInput} onChange={e => setSearchInput(e.target.value)} onKeyDown={e => { if (e.key === 'Enter') { setShowSearchModal(false); const q = searchInput; setSearchInput(''); if (q.trim()) { setInput('搜索: ' + q); setTimeout(() => handleSend(), 100) } } }} placeholder="输入搜索关键词..." /></div>
             </div>
             <div className="modal-footer">
               <button className="btn btn-secondary" onClick={() => setShowSearchModal(false)}>取消</button>
-              <button className="btn btn-primary" onClick={() => { setShowSearchModal(false); const q = searchInput; setSearchInput(''); addMessage({ role: 'user', content: '搜索: ' + q, timestamp: new Date().toISOString() }); api.capWebSearch(q).then(r => { if (r.ok) addMessage({ role: 'assistant', content: r.results || '无结果', timestamp: new Date().toISOString() }) }).catch(() => {}) }}>搜索</button>
+              <button className="btn btn-primary" onClick={() => { setShowSearchModal(false); const q = searchInput; setSearchInput(''); if (q.trim()) { setInput('搜索: ' + q); setTimeout(() => handleSend(), 100) } }}>搜索</button>
             </div>
           </div>
         </div>
@@ -481,7 +546,7 @@ export function ChatPage() {
             </div>
             <div className="modal-footer">
               <button className="btn btn-secondary" onClick={() => setShowMemoryModal(false)}>取消</button>
-              <button className="btn btn-primary" onClick={() => { if (memoryInput.trim()) { api.memoryAdd(memoryInput, 'general').then(() => addMessage({ role: 'assistant', content: '已添加到记忆: ' + memoryInput.slice(0, 50), timestamp: new Date().toISOString() })).catch(() => {}); setMemoryInput(''); setShowMemoryModal(false) } }}>添加</button>
+              <button className="btn btn-primary" onClick={() => { if (memoryInput.trim()) { api.memoryAdd(memoryInput, 'general').then((id) => { addMemory({ id, content: memoryInput, category: 'general', createdAt: new Date().toISOString() }); addMessage({ role: 'assistant', content: '已添加到记忆: ' + memoryInput.slice(0, 50), timestamp: new Date().toISOString() }) }).catch(() => {}); setMemoryInput(''); setShowMemoryModal(false) } }}>添加</button>
             </div>
           </div>
         </div>
