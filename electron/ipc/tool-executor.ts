@@ -3,7 +3,7 @@ import { join, resolve, normalize } from 'path'
 import { app } from 'electron'
 import { kvList, kvUpsert, kvGet } from '../storage/db'
 import { exec, ChildProcess } from 'child_process'
-import { multiSearch, formatSearchResults, getStockQuote, formatStockQuote, getStockQuotes, getMarketIndices, getMarketOverview, formatMarketOverview, searchBaike, searchNews, getExchangeRate, crossReference, getWeather, formatWeather, getHotSearch, formatHotSearch, getDailyBriefing, getPoetry, formatPoetry, getHistoryToday, lookupIP, getJoke, translateText, getGovStats } from './data-providers'
+import { multiSearch, formatSearchResults, getStockQuote, formatStockQuote, getMarketIndices, getMarketOverview, formatMarketOverview, searchBaike, searchNews, getExchangeRate, crossReference, getWeather, formatWeather, getHotSearch, formatHotSearch, getDailyBriefing, getPoetry, formatPoetry, getHistoryToday, lookupIP, getJoke, getGovStats } from './data-providers'
 import { taskDecompose, formatDecomposedTask, decisionAnalysis, formatDecision, matchWorkflowTemplate, listWorkflowTemplates, formatWorkflowTemplate, startProgress, updateStepStatus, getProgressReport, clearProgress, createProjectPlan, formatProjectPlan } from './workflow-skills'
 import { isGitHubUrl, fetchWithMirror, readGitHubUrl, warmupMirrors } from './github-mirror'
 
@@ -71,7 +71,9 @@ function persistToolStats(): void {
   try {
     const data: Record<string, any> = {}
     for (const [name, s] of toolStats) data[name] = s
-    kvUpsert('config', 'tool_stats', { stats: data, savedAt: new Date().toISOString() })
+    const combos: Record<string, any> = {}
+    for (const [key, s] of comboStats) combos[key] = s
+    kvUpsert('config', 'tool_stats', { stats: data, combos, savedAt: new Date().toISOString() })
   } catch {}
 }
 
@@ -86,6 +88,11 @@ export function loadToolStats(): void {
           lastError: s.lastError || '', lastUsed: s.lastUsed || 0,
           totalTime: s.totalTime || 0,
         })
+      }
+    }
+    if (saved?.combos) {
+      for (const [key, s] of Object.entries(saved.combos as Record<string, any>)) {
+        comboStats.set(key, { calls: (s as any).calls || 0, successes: (s as any).successes || 0 })
       }
     }
   } catch {}
@@ -107,6 +114,18 @@ export function getUnreliableTools(): string[] {
     if (s.calls >= 3 && s.successes / s.calls < 0.5) unreliable.push(name)
   }
   return unreliable
+}
+
+// Error context for LLM prompt injection
+export function getErrorContext(): string {
+  const unreliable = getUnreliableTools()
+  if (unreliable.length === 0) return ''
+  const lines: string[] = ['[ERROR LEARNING - 避免使用以下失败工具]']
+  for (const tool of unreliable) {
+    const s = toolStats.get(tool)
+    if (s) lines.push(`- ${tool}: ${s.calls}次调用, 成功率${Math.round(s.successes / s.calls * 100)}%, 最近错误: ${s.lastError?.slice(0, 60)}`)
+  }
+  return lines.join('\n')
 }
 
 // Get average quality score for a tool (0-10 scale)
@@ -194,13 +213,15 @@ function asyncExec(command: string, opts: { timeout?: number; windowsHide?: bool
     })
     runningProcesses.add(proc)
     // Safety: force-kill after 2x timeout if callback never fires
-    setTimeout(() => {
+    const forceKillTimer = setTimeout(() => {
       if (!resolved) {
         try { proc.kill('SIGKILL') } catch {}
         runningProcesses.delete(proc)
         safeResolve(`[ERROR] Command force-killed after ${Math.round(timeout * 2 / 1000)}s`)
       }
     }, timeout * 2)
+    // Clear timer when process completes normally
+    proc.on('close', () => { clearTimeout(forceKillTimer) })
   })
 }
 
@@ -331,6 +352,7 @@ export async function executeTool(name: string, args: any): Promise<string> {
         console.log('[Tool] Writing file:', JSON.stringify(filePath), 'content length:', content.length)
         try {
           writeFileSync(filePath, content)
+          cacheSet(`read:${filePath}`, content)
           const created = existsSync(filePath)
           console.log('[Tool] File exists after write:', created)
           return JSON.stringify({ ok: created, path: filePath, bytes: content.length })
@@ -342,7 +364,62 @@ export async function executeTool(name: string, args: any): Promise<string> {
       case 'list_directory': {
         const dir = args.path || args.directory || app.getPath('home')
         if (!isPathAllowed(dir)) return JSON.stringify({ error: 'Access denied: path outside allowed directories' })
+        const recursive = args.recursive === true || args.recursive === 'true'
+        if (recursive) {
+          const maxDepth = Math.min(args.depth || 3, 5)
+          const scanDir = (d: string, depth: number): any[] => {
+            if (depth > maxDepth) return []
+            try {
+              return readdirSync(d, { withFileTypes: true })
+                .filter(e => !e.name.startsWith('.') && e.name !== 'node_modules' && e.name !== '__pycache__')
+                .slice(0, 30)
+                .map(e => {
+                  const fullPath = join(d, e.name)
+                  const item: any = { name: e.name, type: e.isDirectory() ? 'dir' : 'file' }
+                  if (e.isDirectory() && depth < maxDepth) {
+                    item.children = scanDir(fullPath, depth + 1)
+                  }
+                  return item
+                })
+            } catch { return [] }
+          }
+          return JSON.stringify({ path: dir, tree: scanDir(dir, 0) })
+        }
         return JSON.stringify(readdirSync(dir, { withFileTypes: true }).filter(e => !e.name.startsWith('.')).map(e => ({ name: e.name, type: e.isDirectory() ? 'directory' : 'file' })).slice(0, 50))
+      }
+      // Incremental file modification (patch)
+      case 'ac_patch_file':
+      case 'patch_file': {
+        const filePath = args.path || args.file_path || ''
+        const oldText = args.old_text || args.old || ''
+        const newText = args.new_text || args.new || ''
+        if (!filePath) return JSON.stringify({ error: 'No path provided' })
+        if (!oldText) return JSON.stringify({ error: 'No old_text provided' })
+        if (!isPathAllowed(filePath)) return JSON.stringify({ error: 'Access denied' })
+        if (!existsSync(filePath)) return JSON.stringify({ error: 'File not found' })
+        try {
+          const content = readFileSync(filePath, 'utf8')
+          if (!content.includes(oldText)) return JSON.stringify({ error: 'old_text not found in file' })
+          const patched = content.split(oldText).join(newText)
+          writeFileSync(filePath, patched)
+          return JSON.stringify({ ok: true, path: filePath, bytes: patched.length })
+        } catch (e) { return JSON.stringify({ error: (e as Error).message }) }
+      }
+      // Git operations
+      case 'ac_git':
+      case 'git': {
+        const subcommand = args.command || args.subcommand || 'status'
+        const dir = args.path || args.cwd || process.cwd()
+        if (!isPathAllowed(dir)) return JSON.stringify({ error: 'Access denied' })
+        const safeCommands = ['status', 'diff', 'log', 'branch', 'add', 'commit', 'push', 'pull', 'stash', 'remote']
+        const parts = subcommand.split(/\s+/)
+        const cmd = parts[0]
+        if (!safeCommands.includes(cmd)) return JSON.stringify({ error: `Command '${cmd}' not allowed` })
+        try {
+          const fullCmd = `git ${subcommand}`
+          const result = require('child_process').execSync(fullCmd, { cwd: dir, encoding: 'utf8', timeout: 30000, windowsHide: true })
+          return JSON.stringify({ ok: true, output: result.slice(0, 5000) })
+        } catch (e: any) { return JSON.stringify({ error: e.stderr || e.message }) }
       }
       case 'execute_command':
       case 'terminal':
@@ -356,7 +433,7 @@ export async function executeTool(name: string, args: any): Promise<string> {
           // Use base64-encoded command to avoid all quoting/escaping issues
           const fullCmd = `[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; ${safe}`
           const encoded = Buffer.from(fullCmd, 'utf16le').toString('base64')
-          return asyncExec(`powershell -NoProfile -EncodedCommand ${encoded}`, { timeout: 30000, windowsHide: true })
+          return asyncExec(`powershell -NoProfile -EncodedCommand ${encoded}`, { timeout: 120000, windowsHide: true })
         }
         return asyncExec(safe, { timeout: 30000 })
       }
@@ -755,7 +832,6 @@ ${code}
         const target = args.target || args.to || 'en'
         if (!text) return JSON.stringify({ error: 'No text provided' })
         try {
-          const { kvList } = require('../storage/db')
           const providers = kvList('providers').filter((p: any) => p.apiKey && p.enabled !== false)
           if (providers.length > 0) {
             const prov = providers[0]

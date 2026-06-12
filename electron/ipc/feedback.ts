@@ -2,6 +2,19 @@ import { kvUpsert, kvGet, kvList, memoryFtsUpsert } from '../storage/db'
 import { smartSaveMemory } from './memory-manager'
 import { logger } from './logger'
 
+// Confidence tracking: how many times each correction pattern has been seen
+const correctionCounts = new Map<string, number>()
+
+function getCorrectionConfidence(memory: string): number {
+  const count = correctionCounts.get(memory) || 0
+  correctionCounts.set(memory, count + 1)
+  // Confidence increases with repetition: 1st=0.7, 2nd=0.8, 3rd+=0.9
+  return count === 0 ? 0.7 : count === 1 ? 0.8 : 0.9
+}
+
+// Shared constants
+const CATEGORY_LABELS: Record<string, string> = { finance: '金融分析', coding: '编码开发', data: '数据分析', research: '调研学习', content: '内容创作', general: '通用任务' }
+
 // B05: Behavior feedback learning — detect user corrections and save as memory
 const CORRECTION_PATTERNS: Array<{ pattern: RegExp; memory: string }> = [
   { pattern: /太长|太啰嗦|简洁点|太详细|简短/, memory: '用户偏好简短回复，一句话即可' },
@@ -230,9 +243,10 @@ export function learnFromFeedback(message: string): void {
 
   for (const { pattern, memory } of CORRECTION_PATTERNS) {
     if (pattern.test(message)) {
+      const confidence = getCorrectionConfidence(memory)
       const id = 'mem-feedback-' + Date.now()
-      if (smartSaveMemory(id, memory, 'user_pref', 0.9)) {
-        logger.info('B05', `Learned: ${memory}`)
+      if (smartSaveMemory(id, memory, 'user_pref', confidence)) {
+        logger.info('B05', `Learned (confidence: ${confidence}): ${memory}`)
       }
       break
     }
@@ -244,8 +258,7 @@ export function learnFromFeedback(message: string): void {
   const techTerms = ['api', 'sdk', '框架', '数据库', 'docker', 'kubernetes', '微服务', '架构', '算法', '并发', '异步', '回调', 'promise', 'async', 'await', 'typescript', 'webpack', 'vite', 'redis', 'mysql', 'nginx', 'linux', 'git']
   const techCount = techTerms.filter(t => lower.includes(t)).length
   if (techCount >= 3) {
-    const id = 'mem-profile-tech-' + Date.now()
-    smartSaveMemory(id, '用户技术水平较高，熟悉多种技术栈，可以用专业术语沟通', 'user_profile', 0.5)
+    smartSaveMemory('mem-profile-tech', '用户技术水平较高，熟悉多种技术栈，可以用专业术语沟通', 'user_profile', 0.5)
   }
 
   // Detect domain interests
@@ -259,8 +272,7 @@ export function learnFromFeedback(message: string): void {
   for (const [domain, keywords] of Object.entries(domainMap)) {
     const matchCount = keywords.filter(k => lower.includes(k)).length
     if (matchCount >= 2) {
-      const id = 'mem-profile-domain-' + Date.now()
-      smartSaveMemory(id, `用户关注${domain}领域`, 'user_profile', 0.4)
+      smartSaveMemory(`mem-profile-domain-${domain}`, `用户关注${domain}领域`, 'user_profile', 0.4)
       break
     }
   }
@@ -273,31 +285,30 @@ export function learnFromFeedback(message: string): void {
 function extractEntities(message: string): void {
   // Extract project names (patterns like "XXX项目", "Project XXX", or paths like D:\XXX)
   const projectMatches = message.match(/[\w\\\/]+(?:项目|project|工程|repo)/gi) || []
-  const pathMatch = message.match(/[A-Z]:\\[\w\\\/]+/g) || []
+  const pathMatch = message.match(/[A-Za-z]:\\[\w\\\/]+/g) || []
   const projects = [...new Set([...projectMatches, ...pathMatch])].slice(0, 3)
 
   // Extract technology names
   const techKeywords = ['React', 'Vue', 'Angular', 'Node.js', 'Python', 'Java', 'Go', 'Rust', 'TypeScript', 'Docker', 'Kubernetes', 'Redis', 'MySQL', 'PostgreSQL', 'MongoDB', 'Electron', 'Qt', 'C++', 'C#', 'Swift', 'Kotlin', 'Flutter', 'Next.js', 'Nuxt', 'Vite', 'Webpack', 'Tailwind', 'Prisma', 'Supabase', 'Firebase']
   const techs = techKeywords.filter(t => message.toLowerCase().includes(t.toLowerCase())).slice(0, 5)
 
-  // Save entities to memory (smartSaveMemory handles deduplication)
+  // Save entities to memory (stable IDs for dedup)
   for (const project of projects) {
-    const id = 'entity-proj-' + Date.now() + Math.random().toString(36).slice(2, 6)
-    smartSaveMemory(id, `项目: ${project}`, 'entity', 0.6)
+    const safeId = project.replace(/[^a-zA-Z0-9一-鿿]/g, '_').slice(0, 30)
+    smartSaveMemory(`entity-proj-${safeId}`, `项目: ${project}`, 'entity', 0.6)
   }
 
   for (const tech of techs) {
-    const id = 'entity-tech-' + Date.now() + Math.random().toString(36).slice(2, 6)
-    smartSaveMemory(id, `技术栈: ${tech}`, 'entity', 0.5)
+    smartSaveMemory(`entity-tech-${tech.toLowerCase().replace(/[^a-z0-9]/g, '')}`, `技术栈: ${tech}`, 'entity', 0.5)
   }
 
   // Knowledge graph: create relationships when project + tech co-occur
   if (projects.length > 0 && techs.length > 0) {
     for (const project of projects.slice(0, 2)) {
       for (const tech of techs.slice(0, 3)) {
-        const relContent = `关系: ${project} 使用 ${tech}`
-        const id = 'rel-' + Date.now() + Math.random().toString(36).slice(2, 6)
-        smartSaveMemory(id, relContent, 'entity', 0.55)
+        const safeProj = project.replace(/[^a-zA-Z0-9一-鿿]/g, '_').slice(0, 20)
+        const safeTech = tech.toLowerCase().replace(/[^a-z0-9]/g, '')
+        smartSaveMemory(`rel-${safeProj}-${safeTech}`, `关系: ${project} 使用 ${tech}`, 'entity', 0.55)
       }
     }
   }
@@ -544,9 +555,8 @@ export function getProactiveSuggestions(): string[] {
 
   // Weekly summary pattern (Monday morning)
   if (dayOfWeek === 1 && hour >= 9 && hour <= 11) {
-    const lastWeekActions = behaviorLog.filter(b => Date.now() - b.time < 7 * 24 * 60 * 60 * 1000)
-    if (lastWeekActions.length >= 10) {
-      const topCategory = getTopCategory(lastWeekActions)
+    if (recentActions.length >= 10) {
+      const topCategory = getTopCategory(recentActions)
       suggestions.push(`新的一周开始了！上周您主要在${topCategory}方面，需要我帮您整理上周的工作总结吗？`)
     }
   }
@@ -608,8 +618,7 @@ function getTopCategory(actions: Array<{ category: string }>): string {
   for (const [cat, count] of counts) {
     if (count > max) { top = cat; max = count }
   }
-  const labels: Record<string, string> = { finance: '金融分析', coding: '编码开发', data: '数据分析', research: '调研学习', content: '内容创作', general: '通用任务' }
-  return labels[top] || top
+  return CATEGORY_LABELS[top] || top
 }
 
 // Human-like: generate contextual greeting when starting a new conversation
@@ -630,8 +639,7 @@ export function getContextualGreeting(): string | null {
   // Check for unfinished work patterns
   if (recentActions.length > 0) {
     const lastCategory = recentActions[recentActions.length - 1].category
-    const labels: Record<string, string> = { finance: '金融分析', coding: '编码开发', data: '数据分析', research: '调研学习', content: '内容创作', general: '通用任务' }
-    const categoryLabel = labels[lastCategory] || lastCategory
+    const categoryLabel = CATEGORY_LABELS[lastCategory] || lastCategory
     const lastAction = recentActions[recentActions.length - 1]
     const timeDiff = Math.round((Date.now() - lastAction.time) / (1000 * 60))
 
@@ -727,6 +735,7 @@ const intentRules: Array<{ kw: string[]; agent: string; weight: number }> = [
   { kw: ['股票', '行情', 'K线', 'k线', '涨幅', '跌幅', '大盘', '龙虎榜', '板块', 'stock', 'akshare', '市盈率', '市净率', '选股', '筛选', '涨停', '跌停', '换手率', '量比', '成交量', '主力', '北向资金', '融资融券'], agent: 'stock_analyst', weight: 3 },
   { kw: ['财务', 'ROE', 'PE', 'PB', '财报', '利润', '营收', '毛利率', '净利率', '资产负债率', '现金流', '分红', '股息'], agent: 'stock_analyst', weight: 2 },
   { kw: ['基金', 'ETF', '净值', '收益率', '定投', '基金经理', '持仓'], agent: 'stock_analyst', weight: 2 },
+  { kw: ['股份', '电子', '科技', '集团', '控股', '医药', '能源', '地产', '银行', '保险', '证券'], agent: 'stock_analyst', weight: 2 },
   // Engineering (coding + devops + data)
   { kw: ['写代码', '实现', '编写', '开发', '写个函数', '写个类', 'implement', 'code', 'function', 'class', 'bug', 'debug', '调试', '修复', '报错', '异常', '堆栈'], agent: 'engineer', weight: 2 },
   { kw: ['重构', 'review', '审查', '检查代码', '代码质量', '技术债', 'code smell'], agent: 'engineer', weight: 2 },
@@ -889,4 +898,47 @@ export function analyzeAndOptimize(): { actions: string[]; metrics: Record<strin
   }
 
   return { actions, metrics }
+}
+
+// ─── Enhanced Feedback Detection ───
+const POSITIVE_PATTERNS = /很好|不错|谢谢|完美|太棒了|厉害|可以|没问题|对的|正确|good|great|perfect|thanks|nice/i
+const NEGATIVE_PATTERNS = /不好|错了|不对|重新来|不对劲|不行|换个|不要|no|wrong|bad|try again/i
+
+export function detectEnhancedFeedback(message: string): { type: 'positive' | 'negative' | 'none' } {
+  if (POSITIVE_PATTERNS.test(message)) return { type: 'positive' }
+  if (NEGATIVE_PATTERNS.test(message)) return { type: 'negative' }
+  return { type: 'none' }
+}
+
+export function getFeedbackContext(): string {
+  try {
+    const feedbacks = kvList('feedback_log') as any[]
+    const recent = feedbacks
+      .filter(f => Date.now() - f.timestamp < 7 * 24 * 60 * 60 * 1000)
+      .sort((a: any, b: any) => b.timestamp - a.timestamp)
+
+    if (recent.length === 0) return ''
+
+    const positive = recent.filter(f => f.type === 'positive').slice(0, 3)
+    const negative = recent.filter(f => f.type === 'negative').slice(0, 3)
+
+    const lines: string[] = []
+    if (positive.length > 0) {
+      lines.push('[USER PREFERENCES - 来自用户正面反馈]')
+      for (const f of positive) lines.push(`- 做得好: ${f.context?.slice(0, 100)}`)
+    }
+    if (negative.length > 0) {
+      lines.push('[AVOID - 来自用户负面反馈]')
+      for (const f of negative) lines.push(`- 不要这样做: ${f.context?.slice(0, 100)}`)
+    }
+    return lines.join('\n')
+  } catch {}
+  return ''
+}
+
+export function recordFeedback(type: 'positive' | 'negative', context: string) {
+  try {
+    const id = `feedback_${type}_${Date.now()}`
+    kvUpsert('feedback_log', id, { id, type, context: context.slice(0, 500), timestamp: Date.now() })
+  } catch {}
 }

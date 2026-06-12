@@ -1,13 +1,14 @@
 import { app, BrowserWindow, ipcMain, shell, Tray, Menu, nativeImage } from 'electron'
-import { join, normalize, resolve } from 'path'
-import { existsSync, readFileSync, writeFileSync, mkdirSync, readdirSync, statSync, copyFileSync } from 'fs'
+import { join } from 'path'
+import { existsSync, readFileSync, mkdirSync, readdirSync, statSync, copyFileSync } from 'fs'
 import { homedir, tmpdir } from 'os'
 import { exec, execFile } from 'child_process'
-import { executeTool, killAllProcesses, isPathAllowed, recordToolCall, validateToolParams, checkOutputQuality, loadToolStats, compressToolResult, translateError, getReliableTools, getUnreliableTools, getToolStats, computeResultQuality, recordToolCombination, getReliableCombinations, getSlowTools } from './ipc/tool-executor'
+import { executeTool, killAllProcesses, isPathAllowed, recordToolCall, validateToolParams, checkOutputQuality, loadToolStats, compressToolResult, translateError, getReliableTools, getUnreliableTools, getToolStats, computeResultQuality, recordToolCombination, getReliableCombinations, getSlowTools, getErrorContext } from './ipc/tool-executor'
 import { buildSystemPrompt, BASE_PROMPT, detectMultiStepTask, extractSteps, startTaskTracking, getTaskProgressHint, clearTaskTracking } from './ipc/orchestrator'
-import { initSkillEngine, matchSkills, buildSkillInjection } from './ipc/skill-engine'
+import { initSkillEngine, matchSkills, buildSkillInjection, importSkillFromMarkdown } from './ipc/skill-engine'
+import { withRetry, classifyError } from './ipc/retry-engine'
 import './ipc/builtin-skills'
-import { cacheAgents, cacheMemory, cacheProviders, cacheModels, cacheSkills, cacheRag, cacheConfig, invalidate } from './ipc/chat-cache'
+import { cacheAgents, cacheMemory, cacheProviders, cacheModels, cacheSkills, cacheRag, cacheConfig } from './ipc/chat-cache'
 import { ToolCallRepair, CircuitBreaker } from './ipc/tool-repair'
 
 // P1-3: Self-healing fallbacks — alternative approaches when a tool fails
@@ -193,22 +194,32 @@ function checkForLoop(toolName: string): string | null {
 
   // Count failures for this tool in the window
   const toolFailures = recentFailures.filter(f => f.tool === toolName).length
-  if (toolFailures >= 3) {
+  if (toolFailures >= 5) {
     recentFailures.length = 0 // Reset after triggering
-    return `[LoopEscape] "${toolName}" has failed ${toolFailures} times in the last minute. STOP trying this tool. Use a completely different approach or inform the user. Do NOT call "${toolName}" again.`
+    return `[LoopEscape] "${toolName}" has failed ${toolFailures} times. DO NOT use "${toolName}" again. Use a COMPLETELY DIFFERENT tool or approach. For example: if terminal failed, try code_execute; if search failed, try read_url; if a command failed, try a simpler version. You MUST call a different tool NOW.`
   }
   return null
 }
 import { selectTools, parseTextToolCalls } from './ipc/tools'
-import { learnFromFeedback, selectModel, classifyIntent, logBehavior, getProactiveSuggestions, resetIntentState, loadBehaviorLog, setEmotionalContext, summarizeConversation, detectRepeatedPattern, getContextualGreeting, resetBehaviorMode, getUnifiedResponseGuidance, getExperienceHint, loadPatternCounts, getTopPatterns, queryKnowledgeGraph, analyzeAndOptimize, loadBehaviorMode } from './ipc/feedback'
+import { learnFromFeedback, selectModel, classifyIntent, logBehavior, getProactiveSuggestions, resetIntentState, loadBehaviorLog, setEmotionalContext, summarizeConversation, detectRepeatedPattern, getContextualGreeting, resetBehaviorMode, getUnifiedResponseGuidance, getExperienceHint, loadPatternCounts, getTopPatterns, analyzeAndOptimize, loadBehaviorMode, detectEnhancedFeedback, recordFeedback, getFeedbackContext } from './ipc/feedback'
 import { streamChat as llmStreamChat, wrapToolResult, type StreamContext } from './ipc/llm'
 import { seedDefaults, migrateFromJSON } from './ipc/seed'
-import { connectMcpServer, disconnectMcpServer, callMcpTool, getMcpTools, getMcpStatus } from './ipc/mcp-client'
+import { connectMcpServer, disconnectMcpServer, callMcpTool, getMcpTools, getMcpStatus, initInternalMcpServer, refreshInternalMcpServer } from './ipc/mcp-client'
 import { getUnhealthyTools, getToolHealthReport, validateCustomSkill } from './ipc/tool-health'
-import { runMemoryMaintenance, smartSaveMemory } from './ipc/memory-manager'
-import { safeExec } from './ipc/cron-sandbox'
+import { runMemoryMaintenance, smartSaveMemory, dreamConsolidate } from './ipc/memory-manager'
+import { speak, getVoices, stop as stopTts } from './ipc/tts'
+import { checkPermission, getPermissions, savePermission } from './ipc/permissions'
+import { getTemplatesForAgent, getAllTemplates, saveTemplate } from './ipc/templates'
+import { screenshot, click, typeText, scroll, getScreenSize } from './ipc/computer-use'
+import { navigate as browserNavigate, getContent as browserGetContent, click as browserClick, type as browserType, screenshot as browserScreenshot, extractLinks as browserExtractLinks, close as browserClose } from './ipc/browser-agent'
+import { createEvent, listEvents, getUpcoming, getToday, updateEvent, deleteEvent, getDueReminders } from './ipc/calendar'
+import { generateCandidates, judgeCandidates } from './ipc/max-mode'
+import { analyzeConversations, saveDistilledSkill, getDistilledSkills, distillFromConversation } from './ipc/distill'
 import { startCronScheduler } from './ipc/cron-scheduler'
 import { warmupMirrors } from './ipc/github-mirror'
+import { analyzeTask, createSmartTeam, buildWorkflow, routeTask } from './ipc/smart-collab'
+import { createGoal, getGoals, updateGoal, deleteGoal } from './ipc/background-goals'
+import { buildMemoryConstraints, detectConflicts } from './ipc/memory-enforcer'
 import { logger } from './ipc/logger'
 
 import { randomUUID } from 'crypto'
@@ -216,7 +227,7 @@ import { Agent as UndiciAgent } from 'undici'
 
 // A05: HTTP Keep-Alive agent for LLM API calls
 const keepAliveAgent = new UndiciAgent({ keepAliveTimeout: 60_000, keepAliveMaxTimeout: 600_000, connections: 2 })
-import { initDB, kvList, kvGet, kvUpsert, kvDelete, kvUpsertMany, msgList, msgAdd, msgDeleteByConv, msgCount, msgTokens, gcMsgList, gcMsgAdd, gcMsgBookmark, gcMsgPin, gcMsgBookmarked, gcMsgPinned, gcMsgDeleteByGroup, searchMessages, closeDB, memoryFtsUpsert, memoryFtsDelete, memoryFtsSearch, transaction, getDB } from './storage/db'
+import { initDB, kvList, kvGet, kvUpsert, kvDelete, msgList, msgAdd, msgDeleteByConv, gcMsgList, gcMsgAdd, gcMsgBookmark, gcMsgPin, gcMsgBookmarked, gcMsgPinned, gcMsgDeleteByGroup, searchMessages, closeDB, memoryFtsUpsert, memoryFtsDelete, memoryFtsSearch, semanticSearch, ragFtsUpsert, ragFtsDelete, ragFtsSearch, transaction, getDB } from './storage/db'
 import { runMigrations } from './storage/migrations'
 
 const isDev = process.argv.includes('--dev')
@@ -339,6 +350,11 @@ function createWindow() {
     show: true,
     webPreferences: { preload: join(__dirname, 'preload.js'), contextIsolation: true, nodeIntegration: false, spellcheck: false }
   })
+  // Allow microphone for voice input
+  mainWindow.webContents.session.setPermissionRequestHandler((webContents, permission, callback) => {
+    if (permission === 'media') { callback(true); return }
+    callback(false)
+  })
   if (isDev) { mainWindow.loadURL('http://localhost:5173'); mainWindow.webContents.openDevTools({ mode: 'detach' }) }
   else mainWindow.loadFile(join(__dirname, '..', 'dist', 'index.html'))
   // Open external links in system browser, not inside the app
@@ -397,6 +413,11 @@ function setupIPC() {
   ipcMain.handle('conv:delete', (_, id) => { if (!id) return; kvDelete('conversations', id); msgDeleteByConv(id) })
   ipcMain.handle('conv:messages', (_, cid) => msgList(cid))
   ipcMain.handle('conv:saveMessage', (_, cid, role, content) => { msgAdd(cid, role, content) })
+  ipcMain.handle('conv:updateTitle', (_, cid, title) => {
+    const conv = kvGet('conversations', cid)
+    if (conv) { conv.title = title; kvUpsert('conversations', cid, conv) }
+    return true
+  })
 
   // CRUD — agents
   ipcMain.handle('agents:list', () => kvList('agents'))
@@ -431,9 +452,9 @@ function setupIPC() {
 
   // CRUD — skills
   ipcMain.handle('skills:list', () => kvList('skills'))
-  ipcMain.handle('skills:save', (_, item) => { kvUpsert('skills', item.id, item) })
-  ipcMain.handle('skills:delete', (_, id) => { kvDelete('skills', id) })
-  ipcMain.handle('skills:toggle', (_, id, en) => { const item = kvGet('skills', id); if (item) { item.enabled = en; kvUpsert('skills', id, item) } })
+  ipcMain.handle('skills:save', (_, item) => { kvUpsert('skills', item.id, item); try { refreshInternalMcpServer() } catch {} })
+  ipcMain.handle('skills:delete', (_, id) => { kvDelete('skills', id); try { refreshInternalMcpServer() } catch {} })
+  ipcMain.handle('skills:toggle', (_, id, en) => { const item = kvGet('skills', id); if (item) { item.enabled = en; kvUpsert('skills', id, item); try { refreshInternalMcpServer() } catch {} } })
 
   // Pattern & stats — for UI to display auto-generated skills and tool reliability
   ipcMain.handle('patterns:top', (_, limit) => getTopPatterns(limit || 5))
@@ -445,6 +466,47 @@ function setupIPC() {
   })
   ipcMain.handle('skills:validate', (_, execute: string) => {
     try { return validateCustomSkill(execute) } catch { return { ok: false, reason: 'validation error' } }
+  })
+  ipcMain.handle('skills:market', () => {
+    try {
+      const paths = [
+        join(app.getAppPath(), 'data', 'skills-market.json'),
+        join(__dirname, '..', 'data', 'skills-market.json'),
+        join(process.cwd(), 'data', 'skills-market.json'),
+        join(app.getPath('userData'), 'data', 'skills-market.json'),
+      ]
+      for (const p of paths) {
+        if (existsSync(p)) return JSON.parse(readFileSync(p, 'utf8'))
+      }
+      // Fallback: embedded market data
+      return [
+        { id: 'market-stock-pro', name: '高级选股器', description: '多维度条件选股，技术面+基本面+资金面组合筛选', category: '金融', author: 'AaronClaw', version: '1.0', skills: ['stock_quote','stock_kline','stock_finance','stock_screener','chart_generate'] },
+        { id: 'market-web-scraper', name: '网页抓取器', description: '智能网页抓取，自动提取正文，支持批量', category: '工具', author: 'AaronClaw', version: '1.0', skills: ['read_url','write_file'] },
+        { id: 'market-translate-pro', name: '专业翻译', description: '中英日韩翻译，专业术语行业标准译法', category: '写作', author: 'AaronClaw', version: '1.0', skills: ['translate','text_stats'] },
+        { id: 'market-data-viz', name: '数据可视化', description: '自动生成图表、仪表盘、数据报告', category: '分析', author: 'AaronClaw', version: '1.0', skills: ['chart_generate','data_analyze','data_profile'] },
+        { id: 'market-code-review', name: '代码审查专家', description: '自动审查代码质量、安全性、性能', category: '开发', author: 'AaronClaw', version: '1.0', skills: ['code_review','project_scan','code_execute'] },
+        { id: 'market-news-digest', name: '新闻简报', description: '每日新闻摘要、行业动态追踪', category: '生活', author: 'AaronClaw', version: '1.0', skills: ['news_search','daily_briefing','hot_search'] },
+      ]
+    } catch { return [] }
+  })
+  ipcMain.handle('skills:installFromMarket', (_, skill: any) => {
+    try {
+      const id = 'user-' + (skill.id || skill.name).toLowerCase().replace(/[^a-z0-9]/g, '-')
+      const installed = { id, name: skill.name, description: skill.description, category: skill.category, source: 'market', enabled: true, execute: skill.execute || '', params: skill.params || '' }
+      kvUpsert('skills', id, installed)
+      try { refreshInternalMcpServer() } catch {}
+      return { ok: true, id }
+    } catch (e: any) { return { ok: false, error: e?.message } }
+  })
+  ipcMain.handle('skills:import', (_, content: string, source?: string) => {
+    try {
+      const result = importSkillFromMarkdown(content, source)
+      if (result.ok && result.skill) {
+        kvUpsert('skills', result.skill.id, result.skill)
+        try { refreshInternalMcpServer() } catch {}
+      }
+      return result
+    } catch (e: any) { return { ok: false, error: e?.message } }
   })
 
   // Generated files — tracked from tool write operations
@@ -479,7 +541,6 @@ function setupIPC() {
   ipcMain.handle('cron:list', () => kvList('cron'))
   ipcMain.handle('cron:save', (_, item) => { kvUpsert('cron', item.id, item) })
   ipcMain.handle('cron:delete', (_, id) => { kvDelete('cron', id) })
-  ipcMain.handle('cron:toggle', (_, id, en) => { const item = kvGet('cron', id); if (item) { item.enabled = en; kvUpsert('cron', id, item) } })
 
   // CRUD — models
   ipcMain.handle('models:list', () => kvList('models'))
@@ -497,10 +558,130 @@ function setupIPC() {
   ipcMain.handle('memory:save', (_, item) => { kvUpsert('memory', item.id, item); memoryFtsUpsert(item.id, item.content || '', item.category || 'general') })
   ipcMain.handle('memory:delete', (_, id) => { kvDelete('memory', id); memoryFtsDelete(id) })
   ipcMain.handle('memory:search', (_, query: string) => {
-    const ftsResults = memoryFtsSearch(query, 10)
+    const ftsResults = semanticSearch(query, 10)
     if (ftsResults.length > 0) return ftsResults.map(r => ({ id: r.id, content: r.content, category: r.category }))
-    // Fallback to JS filter for short queries
     return kvList('memory').filter((m: any) => m.content.toLowerCase().includes(query.toLowerCase()))
+  })
+  ipcMain.handle('memory:dream', async () => {
+    try { return await dreamConsolidate() } catch (e: any) { return { consolidated: 0, removed: 0, insights: [e?.message] } }
+  })
+
+  // TTS
+  ipcMain.handle('tts:speak', async (_, text: string, voice?: string) => {
+    try { return await speak(text, voice) } catch (e: any) { return { ok: false, error: e?.message } }
+  })
+  ipcMain.handle('tts:voices', async () => {
+    try { return await getVoices() } catch { return [] }
+  })
+  ipcMain.handle('tts:stop', async () => {
+    try { stopTts(); return { ok: true } } catch { return { ok: false } }
+  })
+
+  // Permissions
+  ipcMain.handle('permissions:check', (_, context: any) => {
+    try { return checkPermission(context) } catch { return { level: 'allow' } }
+  })
+  ipcMain.handle('permissions:list', () => {
+    try { return getPermissions() } catch { return [] }
+  })
+  ipcMain.handle('permissions:save', (_: any, rule: any) => {
+    try { savePermission(rule); return { ok: true } } catch { return { ok: false } }
+  })
+
+  // Templates
+  ipcMain.handle('templates:list', () => {
+    try { return getAllTemplates() } catch { return [] }
+  })
+  ipcMain.handle('templates:forAgent', (_, agentId: string) => {
+    try { return getTemplatesForAgent(agentId) } catch { return [] }
+  })
+  ipcMain.handle('templates:save', (_: any, template: any) => {
+    try { saveTemplate(template); return { ok: true } } catch { return { ok: false } }
+  })
+
+  // Computer Use
+  ipcMain.handle('computer:screenshot', async (_, region?: any) => {
+    try { return await screenshot(region) } catch (e: any) { return { ok: false, error: e?.message } }
+  })
+  ipcMain.handle('computer:click', async (_, x: number, y: number, button?: string) => {
+    try { return await click(x, y, button as any) } catch (e: any) { return { ok: false, error: e?.message } }
+  })
+  ipcMain.handle('computer:type', async (_, text: string) => {
+    try { return await typeText(text) } catch (e: any) { return { ok: false, error: e?.message } }
+  })
+  ipcMain.handle('computer:scroll', async (_, direction: string, amount?: number) => {
+    try { return await scroll(direction as any, amount) } catch (e: any) { return { ok: false, error: e?.message } }
+  })
+  ipcMain.handle('computer:screenSize', async () => {
+    try { return await getScreenSize() } catch { return { width: 1920, height: 1080 } }
+  })
+
+  // Browser Agent
+  ipcMain.handle('browser:navigate', async (_, url: string) => {
+    try { return await browserNavigate(url) } catch (e: any) { return { ok: false, error: e?.message } }
+  })
+  ipcMain.handle('browser:getContent', async () => {
+    try { return await browserGetContent() } catch (e: any) { return { ok: false, error: e?.message } }
+  })
+  ipcMain.handle('browser:click', async (_, selector: string) => {
+    try { return await browserClick(selector) } catch (e: any) { return { ok: false, error: e?.message } }
+  })
+  ipcMain.handle('browser:type', async (_, selector: string, text: string) => {
+    try { return await browserType(selector, text) } catch (e: any) { return { ok: false, error: e?.message } }
+  })
+  ipcMain.handle('browser:screenshot', async () => {
+    try { return await browserScreenshot() } catch (e: any) { return { ok: false, error: e?.message } }
+  })
+  ipcMain.handle('browser:extractLinks', async () => {
+    try { return await browserExtractLinks() } catch (e: any) { return { ok: false, error: e?.message } }
+  })
+  ipcMain.handle('browser:close', async () => {
+    try { await browserClose(); return { ok: true } } catch { return { ok: false } }
+  })
+
+  // Calendar
+  ipcMain.handle('calendar:create', (_, event: any) => {
+    try { return createEvent(event) } catch { return null }
+  })
+  ipcMain.handle('calendar:list', (_, startDate?: string, endDate?: string) => {
+    try { return listEvents(startDate, endDate) } catch { return [] }
+  })
+  ipcMain.handle('calendar:upcoming', () => {
+    try { return getUpcoming() } catch { return [] }
+  })
+  ipcMain.handle('calendar:today', () => {
+    try { return getToday() } catch { return [] }
+  })
+  ipcMain.handle('calendar:update', (_, id: string, updates: any) => {
+    try { updateEvent(id, updates); return { ok: true } } catch { return { ok: false } }
+  })
+  ipcMain.handle('calendar:delete', (_, id: string) => {
+    try { deleteEvent(id); return { ok: true } } catch { return { ok: false } }
+  })
+  ipcMain.handle('calendar:reminders', (_, minutes?: number) => {
+    try { return getDueReminders(minutes) } catch { return [] }
+  })
+
+  // Max Mode
+  ipcMain.handle('maxmode:generate', async (_, prompt: string, systemPrompt: string, models: string[], temperatures?: number[]) => {
+    try { return await generateCandidates(prompt, systemPrompt, models, temperatures) } catch (e: any) { return [] }
+  })
+  ipcMain.handle('maxmode:judge', async (_, prompt: string, candidates: any[]) => {
+    try { return await judgeCandidates(prompt, candidates) } catch (e: any) { return { best: candidates?.[0], reasoning: e?.message } }
+  })
+
+  // Distill
+  ipcMain.handle('distill:analyze', () => {
+    try { return analyzeConversations() } catch { return [] }
+  })
+  ipcMain.handle('distill:save', (_, skill: any) => {
+    try { saveDistilledSkill(skill); return { ok: true } } catch { return { ok: false } }
+  })
+  ipcMain.handle('distill:list', () => {
+    try { return getDistilledSkills() } catch { return [] }
+  })
+  ipcMain.handle('distill:fromConversation', (_, messages: any[]) => {
+    try { return distillFromConversation(messages) } catch { return null }
   })
 
   // Group Chat
@@ -637,6 +818,7 @@ function setupIPC() {
   ipcMain.handle('gc:pin', (_, id) => { gcMsgPin(id, true) })
   ipcMain.handle('gc:pinned', (_, gid) => gcMsgPinned(gid))
   ipcMain.handle('gc:delete', (_, gid) => { kvDelete('groups', gid); gcMsgDeleteByGroup(gid) })
+  ipcMain.handle('gc:clearMessages', (_, gid) => { gcMsgDeleteByGroup(gid); return true })
 
   // Gateway
   ipcMain.handle('gateway:status', async () => {
@@ -650,11 +832,101 @@ function setupIPC() {
     return { ok: false, error: 'OpenClaw not found' }
   })
 
+  // Smart collaboration: analyze task and build team
+  ipcMain.handle('smart:analyze', (_, message: string) => {
+    try { return analyzeTask(message) } catch { return { type: 'general', complexity: 'simple', neededRoles: ['researcher'], suggestedTeam: [], description: message } }
+  })
+  ipcMain.handle('smart:createTeam', (_, analysis: any) => {
+    try { return createSmartTeam(analysis) } catch { return [] }
+  })
+  ipcMain.handle('smart:buildWorkflow', (_, message: string, agentIds: string[], analysis: any) => {
+    try { return buildWorkflow(message, agentIds, analysis) } catch { return [] }
+  })
+  ipcMain.handle('smart:executeStep', async (_, step: any, groupId: string, previousResults: string[]) => {
+    try {
+      const agent = kvGet('agents', step.agentId)
+      if (!agent) return { ok: false, error: 'Agent not found' }
+
+      // Try task routing if agent can't handle it
+      const allAgents = kvList('agents')
+      const routed = routeTask(step.task, allAgents)
+      if (routed && routed.id !== step.agentId) {
+        console.log(`[SmartCollab] Routed task to ${routed.name} (better match)`)
+        step.agentId = routed.id
+        step.agentName = routed.name
+      }
+
+      const port = getOpenClawPort()
+      const config = kvGet('config', 'main') || {}
+      // Build structured context from previous results
+      const contextPrefix = previousResults.length > 0
+        ? '=== COLLABORATION CONTEXT ===\n' +
+          'Previous agent outputs (read carefully, build upon them):\n\n' +
+          previousResults.map((r, i) => `[Step ${i + 1} Output]\n${r.slice(0, 2000)}`).join('\n\n') +
+          '\n\n=== YOUR TASK ===\n'
+        : ''
+      const fullTask = contextPrefix + step.task
+      const msgs = [{ role: 'user', content: fullTask }]
+      // Use agent's model and skills
+      const providers2 = cacheProviders()
+      const prov = providers2.find((p: any) => p.apiKey && p.enabled !== false)
+      let apiBase = `http://127.0.0.1:${port}/v1/chat/completions`
+      let apiKey = ''
+      let modelName = agent.model || 'openclaw'
+      if (prov?.apiKey) {
+        apiBase = (prov.baseUrl || '').replace(/\/+$/, '') + '/chat/completions'
+        apiKey = prov.apiKey
+      }
+      const resp = await fetch(apiBase, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...(apiKey ? { 'Authorization': `Bearer ${apiKey}` } : {}) },
+        body: JSON.stringify({ model: modelName, messages: [{ role: 'system', content: agent.expertise || 'You are a helpful assistant.' }, ...msgs], stream: false, max_tokens: 4096 }),
+        signal: AbortSignal.timeout(60000),
+      })
+      const data = await resp.json()
+      const result = data.choices?.[0]?.message?.content || ''
+      // Save to group messages
+      gcMsgAdd(groupId, step.agentId, step.agentName, 'agent', result)
+      return { ok: true, result }
+    } catch (e: any) { return { ok: false, error: e?.message || 'Execution failed' } }
+  })
+
+  // Background Goals
+  ipcMain.handle('goals:list', () => getGoals())
+  ipcMain.handle('goals:create', (_, title: string, task: string, steps?: string[]) => createGoal(title, task, steps))
+  ipcMain.handle('goals:delete', (_, id: string) => { deleteGoal(id); return true })
+  ipcMain.handle('goals:execute', async (_, goalId: string) => {
+    const goal = kvGet('goals', goalId) as any
+    if (!goal) return { ok: false, error: 'Goal not found' }
+    updateGoal(goalId, { status: 'running', progress: 0 })
+    try {
+      const port = getOpenClawPort()
+      const providers = cacheProviders()
+      const prov = providers.find((p: any) => p.apiKey && p.enabled !== false)
+      let apiBase = `http://127.0.0.1:${port}/v1/chat/completions`
+      let apiKey = ''
+      if (prov?.apiKey) { apiBase = (prov.baseUrl || '').replace(/\/+$/, '') + '/chat/completions'; apiKey = prov.apiKey }
+      const resp = await fetch(apiBase, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...(apiKey ? { 'Authorization': `Bearer ${apiKey}` } : {}) },
+        body: JSON.stringify({ model: 'openclaw', messages: [{ role: 'user', content: goal.task }], stream: false, max_tokens: 4096 }),
+        signal: AbortSignal.timeout(120000),
+      })
+      const data = await resp.json()
+      const result = data.choices?.[0]?.message?.content || ''
+      updateGoal(goalId, { status: 'done', progress: 100, result, completedAt: new Date().toISOString() })
+      return { ok: true, result }
+    } catch (e: any) {
+      updateGoal(goalId, { status: 'failed', error: e?.message })
+      return { ok: false, error: e?.message }
+    }
+  })
+
   // Chat streaming
   let abortCtrl: AbortController | null = null
   let chatGeneration = 0
   let lastConvId: string | null = null
-  ipcMain.handle('chat:send', async (_, { message, history, systemPrompt, model, agentId, convId }) => {
+  ipcMain.handle('chat:send', async (_, { message, history, systemPrompt, model, agentId, convId, devMode }) => {
     const perfStart = Date.now()
     // Reset intent state when switching conversations, summarize previous conversation
     if (convId !== lastConvId) {
@@ -688,8 +960,23 @@ function setupIPC() {
     const agent = agentId
       ? agents.find((a: any) => a.id === agentId)
       : agents.find((a: any) => a.id === intentResult.agentId) || agents[0]
+
     // B05: Learn from user feedback
     learnFromFeedback(message)
+    // Enhanced feedback detection
+    const feedback = detectEnhancedFeedback(message)
+    if (feedback.type === 'positive') {
+      recordFeedback('positive', message)
+      console.log('[Feedback] Positive feedback detected')
+    } else if (feedback.type === 'negative') {
+      recordFeedback('negative', message)
+      console.log('[Feedback] Negative feedback detected')
+    }
+    // Detect memory conflicts
+    const conflicts = detectConflicts(message)
+    if (conflicts.length > 0) {
+      console.log('[Memory] Conflicts detected:', conflicts)
+    }
     // Detect emotional tone for response adaptation
     setEmotionalContext(message)
     // Logic: detect multi-step tasks and start tracking
@@ -728,7 +1015,11 @@ function setupIPC() {
       workflow_template: 'workflow_template', progress_track: 'progress_track',
       project_plan: 'project_plan',
     }
-    const toolNames = (agent?.skills || []).map((s: string) => {
+    // Base skills: all agents automatically get these (universal tools)
+    const BASE_SKILLS = ['search', 'read_file', 'write_file', 'read_url', 'memory_save']
+    const agentSkills = agent?.skills || []
+    const mergedSkills = [...new Set([...BASE_SKILLS, ...agentSkills])]
+    const toolNames = mergedSkills.map((s: string) => {
       if (SKILL_TO_TOOL[s]) return SKILL_TO_TOOL[s]
       // Custom skills: if not in static map, check if it has an execute script → tool name is skill_<id>
       const skill = cacheSkills().find((sk: any) => sk.id === s)
@@ -810,13 +1101,19 @@ function setupIPC() {
       '2. One tool call per step. Short confirmation after.',
       '3. Use full absolute paths. Windows backslash paths.',
       '4. PowerShell for all commands.',
-      '5. Tool failure: read error, fix, retry. Never give up.',
+      '5. CRITICAL: When a tool fails, you MUST immediately try a different tool or approach. NEVER just describe the error — ACT on it. If ac_terminal fails, try code_execute. If ac_web_search fails, try ac_read_url. If one approach fails, try another. Keep trying until success or all options exhausted.',
       '6. memory_save for user preferences and project facts.',
       '7. Interpret tool results — don\'t dump raw output. Explain what it means.',
       '8. For complex tasks: state plan → execute → verify → summarize.',
       '9. If a task is beyond your capabilities, say so clearly and suggest alternatives.',
+      '10. NEVER end a response with just an error description. Always follow up with a tool call to try an alternative.',
     ].join('\n')
-    const fullSystemPrompt = [envInfo, envRules, finalPrompt].filter(Boolean).join('\n\n')
+    // Inject memory constraints, error learning, and feedback context
+    const memoryConstraints = buildMemoryConstraints()
+    const errorContext = getErrorContext()
+    const feedbackContext = getFeedbackContext()
+    const allContextParts = [envInfo, envRules, memoryConstraints, errorContext, feedbackContext, finalPrompt].filter(Boolean)
+    const fullSystemPrompt = allContextParts.join('\n\n')
     if (fullSystemPrompt) msgs.push({ role: 'system', content: fullSystemPrompt })
 
     // Contradiction detection — check if tool results conflict with each other
@@ -850,96 +1147,50 @@ function setupIPC() {
       // Verify if: multiple tools used, or complex tools, or error recovery happened
       return toolCalls.length >= 3 || toolCalls.some(tc => ['ac_terminal', 'code_execute', 'ac_write_file'].includes(tc.function.name))
     }
-    // Memory injection — single-pass with targeted FTS5 queries
+    // Memory injection — use FTS5 for relevant memories instead of loading all
     const memories = cacheMemory()
-    const memoryCategories: Record<string, any[]> = {}
-    let lastTask: any = null
-    for (const m of memories) {
-      const cat = m.category || 'general'
-      if (!memoryCategories[cat]) memoryCategories[cat] = []
-      memoryCategories[cat].push(m)
-      if (m.id === 'last_task_state') lastTask = m
+    // Always inject user preferences (small, always relevant)
+    const userPrefs = memories.filter((m: any) => m.category === 'user_pref').slice(0, 10)
+    if (userPrefs.length > 0) {
+      msgs.push({ role: 'system', content: `User profile:\n${userPrefs.map((m: any) => `- ${m.content}`).join('\n')}` })
     }
-    // User profile (user_pref)
-    const userPrefs = memoryCategories['user_pref']
-    if (userPrefs?.length > 0) {
-      msgs.push({ role: 'system', content: `User profile (persistent preferences):\n${userPrefs.slice(0, 10).map((m: any) => `- ${m.content}`).join('\n')}` })
-    }
-    // Task experience (task_experience)
-    const taskExps = memoryCategories['task_experience']
-    if (taskExps?.length > 0) {
-      msgs.push({ role: 'system', content: `Recent task experience:\n${taskExps.slice(-3).map((m: any) => `- ${m.content}`).join('\n')}` })
+    // Task experience — last 3
+    const taskExps = memories.filter((m: any) => m.category === 'task_experience').slice(-3)
+    if (taskExps.length > 0) {
+      msgs.push({ role: 'system', content: `Recent task experience:\n${taskExps.map((m: any) => `- ${m.content}`).join('\n')}` })
     }
     // Cross-session continuity
+    const lastTask = memories.find((m: any) => m.id === 'last_task_state')
     if (lastTask && (!convId || !history || history.length === 0)) {
       const taskAge = Date.now() - new Date(lastTask.createdAt || 0).getTime()
       if (taskAge < 86400000) {
-        msgs.push({ role: 'system', content: `Previous session context: ${lastTask.content}\nIf the user's message relates to this task, continue from where they left off.` })
+        msgs.push({ role: 'system', content: `Previous session: ${lastTask.content}\nIf related, continue from where left off.` })
       }
     }
-    // Knowledge graph — entities matching current message (pass pre-filtered list)
+    // FTS5 search for message-relevant memories (replaces full scan)
     try {
-      const entityMemories = memoryCategories['entity'] || []
-      const kg = queryKnowledgeGraph(message, entityMemories)
-      if (kg.entities.length > 0 || kg.relations.length > 0) {
-        const kgLines: string[] = []
-        if (kg.entities.length > 0) kgLines.push(`Known entities: ${kg.entities.join('; ')}`)
-        if (kg.relations.length > 0) kgLines.push(`Known relations: ${kg.relations.join('; ')}`)
-        msgs.push({ role: 'system', content: `Knowledge graph:\n${kgLines.join('\n')}` })
-      }
-    } catch {}
-    // FTS5 memory search — simplified token extraction
-    if (memories.length > 0) {
-      const words = message.toLowerCase().split(/[\s,.;!?。；！？、\n]+/).filter((w: string) => w.length > 1).slice(0, 10)
+      const words = message.toLowerCase().split(/[\s,.;!?。；！？、\n]+/).filter((w: string) => w.length > 1).slice(0, 8)
       if (words.length > 0) {
         const ftsQuery = words.map((t: string) => `"${t}"`).join(' OR ')
         const ftsResults = memoryFtsSearch(ftsQuery, 5)
         if (ftsResults.length > 0) {
-          msgs.push({ role: 'system', content: `Key memories:\n${ftsResults.map((r: any) => `- ${r.content}`).join('\n')}` })
-        } else {
-          // JS fallback — single pass score
-          const scored = memories.map((m: any) => {
-            const lc = m.content.toLowerCase()
-            return { m, score: words.filter((w: string) => lc.includes(w)).length }
-          }).filter((s: any) => s.score > 0).sort((a: any, b: any) => b.score - a.score)
-          if (scored.length > 0) {
-            msgs.push({ role: 'system', content: `Key memories:\n${scored.slice(0, 5).map((s: any) => `- ${s.m.content}`).join('\n')}` })
-          }
+          msgs.push({ role: 'system', content: `Relevant memories:\n${ftsResults.map((r: any) => `- ${r.content}`).join('\n')}` })
         }
       }
-    }
-    // Auto-inject relevant RAG knowledge base content (pre-chunked, limited scan)
+    } catch {}
+    // Auto-inject relevant RAG knowledge base content (FTS5 optimized)
     const ragDocs = cacheRag()
     if (ragDocs.length > 0) {
-      const qWords = message.toLowerCase().split(/[\s,.;!?。；！？、\n]+/).filter((w: string) => w.length > 1)
-      if (qWords.length > 0) {
-        const ragResults: { text: string; score: number }[] = []
-        const scanLimit = Math.min(ragDocs.length, 20) // cap at 20 docs per query
-        for (let d = 0; d < scanLimit; d++) {
-          const content = ragDocs[d].content || ''
-          if (!content) continue
-          // Quick pre-filter: skip doc if no query word appears at all
-          const contentLower = content.toLowerCase()
-          if (!qWords.some((w: string) => contentLower.includes(w))) continue
-          // Split into chunks (first 500 chars each, max 5 chunks per doc)
-          const chunks: string[] = []
-          for (let i = 0; i < content.length && chunks.length < 5; i += 500) {
-            chunks.push(content.slice(i, i + 500))
-          }
-          for (const chunk of chunks) {
-            const chunkLower = chunk.toLowerCase()
-            const matchCount = qWords.filter((w: string) => chunkLower.includes(w)).length
-            if (matchCount > 0) {
-              ragResults.push({ text: chunk.trim(), score: matchCount / qWords.length })
-            }
+      try {
+        const words = message.toLowerCase().split(/[\s,.;!?。；！？、\n]+/).filter((w: string) => w.length > 1).slice(0, 8)
+        if (words.length > 0) {
+          const ftsQuery = words.map((t: string) => `"${t}"`).join(' OR ')
+          const ragResults = ragFtsSearch(ftsQuery, 3)
+          if (ragResults.length > 0) {
+            msgs.push({ role: 'system', content: `Relevant knowledge base:\n${ragResults.map((r: any) => r.chunk_text).join('\n\n---\n\n')}` })
           }
         }
-        ragResults.sort((a, b) => b.score - a.score)
-        const topRag = ragResults.slice(0, 3)
-        if (topRag.length > 0 && topRag[0].score >= 0.3) {
-          msgs.push({ role: 'system', content: `Relevant knowledge base:\n${topRag.map(r => r.text).join('\n\n---\n\n')}` })
-        }
-      }
+      } catch {}
     }
     // P2-3: Decision analysis template injection
     const decisionKeywords = ['选择', '对比', '比较', '哪个好', '应该选', '推荐', '决策', '评估', '利弊', '优缺点', 'trade-off', 'which is better', 'should i choose']
@@ -956,23 +1207,27 @@ function setupIPC() {
         // Always keep recent messages
         const recent = history.slice(-MAX_RECENT)
         const older = history.slice(0, -MAX_RECENT)
+        // Performance cap: only scan last 50 older messages for relevance
+        const scanLimit = Math.min(older.length, 50)
+        const scanStart = older.length - scanLimit
+        const scanOlder = older.slice(scanStart)
         // Extract keywords from current message for relevance matching
         const msgWords = new Set(message.toLowerCase().split(/[\s,，。！？、；：""''（）()\[\]{}]+/).filter((w: string) => w.length > 1))
-        // Score older messages by relevance
-        const scored = older.map((m: any, i: number) => {
-          if (m.role === 'system') return { m, score: 10, i }
+        // Score older messages by relevance (optimized: single pass)
+        const scored: Array<{ m: any; score: number; i: number }> = []
+        for (let i = 0; i < scanOlder.length; i++) {
+          const m = scanOlder[i]
+          if (m.role === 'system') { scored.push({ m, score: 10, i: scanStart + i }); continue }
           const content = (m.content || '').toLowerCase()
           let score = 0
-          // Keyword relevance
-          for (const w of msgWords) { if ((w as string).length > 1 && content.includes(w as string)) score++ }
-          // Boost tool result messages (contain factual data)
+          for (const w of msgWords) { if (content.includes(w as string)) score++ }
+          if (score === 0) continue
           if (m.role === 'tool' || content.includes('[tool result]') || content.includes('tool_call')) score += 3
-          // Boost messages with code/file paths (technical context)
           if (/[A-Z]:\\|\.ts|\.js|\.py|\.json|\.css/.test(m.content || '')) score += 2
-          return { m, score, i }
-        }).filter((s: any) => s.score > 0)
-        scored.sort((a: any, b: any) => b.score - a.score || a.i - b.i)
-        const relevant = scored.slice(0, 6).map((s: any) => s.m)
+          scored.push({ m, score, i: scanStart + i })
+        }
+        scored.sort((a, b) => b.score - a.score || a.i - b.i)
+        const relevant = scored.slice(0, 6).map((s) => s.m)
         const trimmed = [...relevant, ...recent]
         console.log(`[Chat] A03: Smart window ${history.length} -> ${trimmed.length} messages (${relevant.length} relevant + ${recent.length} recent)`)
         msgs.push(...trimmed)
@@ -981,7 +1236,7 @@ function setupIPC() {
     msgs.push({ role: 'user', content: message })
     if (convId) msgAdd(convId, 'user', message)
 
- // ռ tool_calls thinking
+    // collect tool_calls and thinking
     const collectedToolCalls: any[] = []
     let collectedThinking = ''
     let lastText = ''
@@ -1002,9 +1257,16 @@ function setupIPC() {
       'chart_generate': { type: 'function', function: { name: 'ac_chart_generate', description: 'Generate charts with Python matplotlib', parameters: { type: 'object', properties: { code: { type: 'string', description: 'Python code to generate charts' } }, required: ['code'] } } },
       'memory_save': { type: 'function', function: { name: 'memory_save', description: 'Save important information to long-term memory', parameters: { type: 'object', properties: { content: { type: 'string' }, category: { type: 'string', enum: ['user_pref', 'project', 'architecture', 'config', 'general'] } }, required: ['content', 'category'] } } },
       'read_url': { type: 'function', function: { name: 'ac_read_url', description: 'Fetch a URL and return its readable text content. Use this to read web pages, articles, documentation, APIs, or any URL. Returns extracted text from the page (not raw HTML). Unlike ac_browser (which just opens a page visually), this actually returns the content.', parameters: { type: 'object', properties: { url: { type: 'string', description: 'Full URL to fetch (must start with http/https)' } }, required: ['url'] } } },
+      'patch_file': { type: 'function', function: { name: 'ac_patch_file', description: 'Incrementally modify a file by replacing specific text. Use this instead of write_file when you only need to change part of a file. Requires old_text (exact text to find) and new_text (replacement).', parameters: { type: 'object', properties: { path: { type: 'string', description: 'File path' }, old_text: { type: 'string', description: 'Exact text to find and replace' }, new_text: { type: 'string', description: 'Replacement text' } }, required: ['path', 'old_text', 'new_text'] } } },
+      'git': { type: 'function', function: { name: 'ac_git', description: 'Run Git commands. Supports: status, diff, log, branch, add, commit, push, pull, stash, remote. Use for version control operations.', parameters: { type: 'object', properties: { command: { type: 'string', description: 'Git subcommand (e.g. "status", "add . && commit -m message", "log --oneline -10")' }, path: { type: 'string', description: 'Working directory (optional)' } }, required: ['command'] } } },
       'translate': { type: 'function', function: { name: 'translate', description: 'Translate text to a target language', parameters: { type: 'object', properties: { text: { type: 'string', description: 'Text to translate' }, target: { type: 'string', description: 'Target language (e.g. en, zh, ja)' } }, required: ['text', 'target'] } } },
-      'list_directory': { type: 'function', function: { name: 'list_directory', description: 'List files and folders in a directory', parameters: { type: 'object', properties: { path: { type: 'string', description: 'Directory path to list' } }, required: ['path'] } } },
+      'list_directory': { type: 'function', function: { name: 'list_directory', description: 'List files and folders in a directory. Use recursive:true to scan project structure. Returns tree with file types.', parameters: { type: 'object', properties: { path: { type: 'string', description: 'Directory path to list' }, recursive: { type: 'boolean', description: 'Scan recursively (default false)' }, depth: { type: 'number', description: 'Max recursion depth (1-5, default 3)' } }, required: ['path'] } } },
       'memory_search': { type: 'function', function: { name: 'memory_search', description: 'Search previously saved memories by keyword', parameters: { type: 'object', properties: { query: { type: 'string', description: 'Search keyword' } }, required: ['query'] } } },
+      // Stock tools
+      'stock_quote': { type: 'function', function: { name: 'skill_stock_quote', description: 'Get real-time stock quote for A-share market. Returns price, change, volume, PE, PB, market cap. Use for checking current stock prices.', parameters: { type: 'object', properties: { code: { type: 'string', description: 'Stock code (e.g. 600519, 002119)' } }, required: ['code'] } } },
+      'stock_kline': { type: 'function', function: { name: 'skill_stock_kline', description: 'Get K-line (candlestick) data for a stock. Returns daily OHLCV data. Use for technical analysis.', parameters: { type: 'object', properties: { code: { type: 'string', description: 'Stock code (e.g. 600519)' }, period: { type: 'string', enum: ['daily', 'weekly', 'monthly'], description: 'Data period' } }, required: ['code'] } } },
+      'stock_finance': { type: 'function', function: { name: 'skill_stock_finance', description: 'Get financial statements for a stock. Returns revenue, profit, ROE, PE, PB. Use for fundamental analysis.', parameters: { type: 'object', properties: { code: { type: 'string', description: 'Stock code (e.g. 600519)' } }, required: ['code'] } } },
+      'stock_screener': { type: 'function', function: { name: 'skill_stock_screener', description: 'Screen stocks by conditions. Returns list of matching stocks. Use for finding stocks that meet specific criteria.', parameters: { type: 'object', properties: { condition: { type: 'string', description: 'Screening condition (e.g. PE<20, ROE>15%)' } }, required: ['condition'] } } },
       // Data providers — free Chinese APIs
       'market_overview': { type: 'function', function: { name: 'ac_market_overview', description: 'Get real-time A-share market overview: major indices (Shanghai, Shenzhen, CSI300, ChiNext) and market breadth (up/down counts). Use this for market sentiment and index data.', parameters: { type: 'object', properties: {} } } },
       'news_search': { type: 'function', function: { name: 'ac_news', description: 'Search Chinese news from Baidu News. Returns recent news articles with titles, sources, and dates. Use for current events, company news, industry updates.', parameters: { type: 'object', properties: { query: { type: 'string', description: 'News search query' } }, required: ['query'] } } },
@@ -1032,7 +1294,9 @@ function setupIPC() {
     // Auto-inject enabled skills (skip search - we handle it server-side via Baidu)
     const unhealthyTools = await getUnhealthyTools()
     const enabledSkills = cacheSkills().filter((s: any) => s.enabled !== false && s.id !== 'search')
-    const agentSkillFilter = agent?.skills && Array.isArray(agent.skills) ? new Set(agent.skills) : null
+    const BASE_SKILLS_INJECT = ['search', 'read_file', 'write_file', 'read_url', 'memory_save']
+    const agentSkillFilter = agent?.skills && Array.isArray(agent.skills) ? new Set([...BASE_SKILLS_INJECT, ...agent.skills]) : null
+    const agentToolWhitelist = agent?.toolWhitelist && Array.isArray(agent.toolWhitelist) ? new Set(agent.toolWhitelist) : null
     for (const skill of enabledSkills) {
       if (agentSkillFilter && !agentSkillFilter.has(skill.id)) continue
       const mapped = skillMap[skill.id]
@@ -1040,6 +1304,23 @@ function setupIPC() {
         if (!unhealthyTools.has(mapped.function.name)) {
           tools.push(mapped)
           addedToolNames.add(mapped.function.name)
+        }
+      }
+      // Auto-generate tool definition for any skill not in skillMap
+      if (!mapped && !addedToolNames.has(skill.id)) {
+        const toolName = skill.source === 'builtin' ? skill.id : 'skill_' + skill.id.replace(/[^a-zA-Z0-9_]/g, '_')
+        if (!unhealthyTools.has(toolName)) {
+          tools.push({
+            type: 'function',
+            function: {
+              name: toolName,
+              description: skill.description || skill.name || skill.id,
+              parameters: skill.execute
+                ? { type: 'object', properties: { input: { type: 'string', description: skill.params || 'Input' } }, required: ['input'] }
+                : { type: 'object', properties: { code: { type: 'string', description: 'Code or input' }, language: { type: 'string', description: 'python or javascript' } }, required: ['code', 'language'] },
+            },
+          })
+          addedToolNames.add(toolName)
         }
       }
       // Custom skills with execute script
@@ -1063,9 +1344,10 @@ function setupIPC() {
       }
     }
 
-    // Inject MCP tools from connected servers
+    // Inject MCP tools from connected servers (skip __builtin__ — those are already registered above)
     const mcpTools = getMcpTools()
     for (const mt of mcpTools) {
+      if (mt.serverId === '__builtin__') continue
       if (!addedToolNames.has(mt.name) && !unhealthyTools.has(mt.name)) {
         tools.push({
           type: 'function',
@@ -1098,7 +1380,23 @@ function setupIPC() {
     }
 
     // Dynamic tool selection
-    const filteredTools = selectTools(message, tools)
+    let filteredTools = selectTools(message, tools)
+
+    // Per-agent tool whitelist filtering
+    if (agentToolWhitelist && agentToolWhitelist.size > 0) {
+      filteredTools = filteredTools.filter((t: any) => agentToolWhitelist.has(t.function?.name || ''))
+    }
+
+    // Dev mode tool filtering
+    if (devMode === 'plan') {
+      // Plan mode: only read-only tools (no write, no terminal, no code execution)
+      filteredTools = filteredTools.filter((t: any) => {
+        const name = t.function?.name || ''
+        return !['ac_write_file', 'ac_terminal', 'code_execute', 'ac_browser'].includes(name)
+      })
+    }
+    // Code mode: all tools (default)
+    // Auto mode: all tools (same as code, but LLM doesn't ask for confirmation)
 
     // Token budget management — estimate tokens and trim if needed
     const estimateTokens = (text: string) => Math.ceil(text.length / 3) // ~3 chars per token for mixed CJK/EN
@@ -1145,6 +1443,67 @@ function setupIPC() {
       console.log(`[Chat] Token budget after trim: ~${totalEstimate} tokens`)
     }
 
+    const mw = mainWindow
+    abortCtrl = new AbortController()
+
+    // Pressure level detection (0-3)
+    const pressurePct = totalEstimate / maxContext
+    const pressureLevel = pressurePct < 0.5 ? 0 : pressurePct < 0.7 ? 1 : pressurePct < 0.85 ? 2 : 3
+    if (pressureLevel >= 2) {
+      console.log(`[Chat] Context pressure: level ${pressureLevel} (${Math.round(pressurePct * 100)}%)`)
+      mw?.webContents.send('chat:stage', `pressure-${pressureLevel}`)
+    }
+
+    // Auto-compaction: when pressure >= 2, summarize older messages
+    if (pressureLevel >= 2 && history && history.length > 6) {
+      try {
+        const toSummarize = history.slice(0, -6).filter((m: any) => m.role !== 'system')
+        if (toSummarize.length >= 4) {
+          const summaryText = toSummarize.map((m: any) => `[${m.role}]: ${(m.content || '').slice(0, 200)}`).join('\n')
+          const compactionPrompt = `Summarize this conversation history in 2-3 sentences, preserving key facts and decisions:\n\n${summaryText.slice(0, 3000)}`
+          const port = getOpenClawPort()
+          const providers2 = cacheProviders()
+          const prov = providers2.find((p: any) => p.apiKey && p.enabled !== false)
+          let apiBase2 = `http://127.0.0.1:${port}/v1/chat/completions`
+          let apiKey2 = ''
+          if (prov?.apiKey) { apiBase2 = (prov.baseUrl || '').replace(/\/+$/, '') + '/chat/completions'; apiKey2 = prov.apiKey }
+          const resp = await fetch(apiBase2, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', ...(apiKey2 ? { 'Authorization': `Bearer ${apiKey2}` } : {}) },
+            body: JSON.stringify({ model: model || 'openclaw', messages: [{ role: 'user', content: compactionPrompt }], stream: false, max_tokens: 300 }),
+            signal: AbortSignal.timeout(15000),
+          })
+          const data = await resp.json()
+          const summary = data.choices?.[0]?.message?.content || ''
+          if (summary && summary.length > 20) {
+            const keepFrom = history.length - 6
+            const removedCount = keepFrom
+            msgs.splice(0, msgs.length, { role: 'system', content: `[Previous conversation summary]\n${summary}` }, ...history.slice(-6))
+            totalEstimate = estimateTokens(summary) + history.slice(-6).reduce((s: number, m: any) => s + estimateTokens(m.content || ''), 0) + toolTokenEstimate
+            console.log(`[Chat] Compacted ${removedCount} messages into summary. New estimate: ~${totalEstimate} tokens`)
+            mw?.webContents.send('chat:stage', 'compacted')
+          }
+        }
+      } catch (e) {
+        console.warn('[Chat] Compaction failed:', (e as Error).message)
+      }
+    }
+
+    // Checkpoint save (every 10 messages)
+    if (convId && history && history.length > 0 && history.length % 10 === 0) {
+      try {
+        const checkpoint = {
+          convId,
+          messageCount: history.length,
+          tokenEstimate: totalEstimate,
+          lastMessage: history[history.length - 1]?.content?.slice(0, 100),
+          timestamp: new Date().toISOString(),
+        }
+        kvUpsert('checkpoints', convId, checkpoint)
+        console.log(`[Chat] Checkpoint saved for ${convId}`)
+      } catch {}
+    }
+
     // Inject tool instruction into system prompt when tools are available
     if (filteredTools.length > 0) {
       const toolNames = filteredTools.map((t: any) => t.function.name).join(', ')
@@ -1155,13 +1514,15 @@ function setupIPC() {
         msgs.unshift({ role: 'system', content: toolInstruction.trim() })
       }
     }
-    const mw = mainWindow
-    abortCtrl = new AbortController()
 
     // Determine API target: prefer direct provider (supports tool_calls), fallback to Gateway
     const config = kvGet('config', 'main') || {}
     const providers = cacheProviders()
     const agentModel = selectModel(message, model || agent?.model || config.ai?.model || 'openclaw', providers)
+    const resolvedModelId = agentModel !== 'openclaw' ? agentModel : config.ai?.model
+    const modelEntry = cacheModels().find((m: any) => m.id === resolvedModelId)
+    const modelMaxTokens = modelEntry?.maxTokens
+    const modelContextWindow = modelEntry?.contextWindow
     let apiBase = `http://127.0.0.1:${port}/v1/chat/completions`
     let apiKey = ''
     let modelName = 'openclaw'
@@ -1230,29 +1591,25 @@ function setupIPC() {
       const streamCtx: StreamContext = {
         mainWindow: mw, apiBase, apiKey, modelName,
         abortSignal: abortCtrl!.signal, dispatcher: keepAliveAgent,
-        generation: myGen, chatGeneration: () => chatGeneration, config
+        generation: myGen, chatGeneration: () => chatGeneration, config,
+        modelMaxTokens, modelContextWindow,
       }
       const doStreamChat = (messages: any[], requestTools?: any[], opts?: any) => llmStreamChat(streamCtx, messages, requestTools, opts)
 
       // LLM 请求重试包装: 网络/超时/限速错误自动重试
       const doStreamChatWithRetry = async (messages: any[], requestTools?: any[], opts?: any, maxRetries = 2) => {
-        let lastErr: any
-        for (let attempt = 0; attempt <= maxRetries; attempt++) {
-          try {
-            return await doStreamChat(messages, requestTools, opts)
-          } catch (e: any) {
-            lastErr = e
-            const msg = e?.message || ''
-            const isRetryable = /timeout|ECONNREFUSED|ENOTFOUND|fetch failed|429|503|502|网络|取消|abort/i.test(msg)
-              && !/401|403|invalid|authentication/i.test(msg)
-            if (!isRetryable || attempt === maxRetries) throw e
-            const delay = (attempt + 1) * 2000 // 2s, 4s
-            console.warn(`[Chat] LLM request failed (attempt ${attempt + 1}/${maxRetries + 1}), retrying in ${delay}ms:`, msg.slice(0, 100))
-            mw?.webContents.send('chat:stage', 'retrying')
-            await new Promise(r => setTimeout(r, delay))
+        const retryResult = await withRetry(
+          () => doStreamChat(messages, requestTools, opts),
+          {
+            maxRetries,
+            onRetry: (error, delay, attempt) => {
+              console.warn(`[Chat] LLM retry ${attempt + 1}/${maxRetries + 1} in ${delay}ms: ${error.message}`)
+              mw?.webContents.send('chat:stage', 'retrying')
+            },
           }
-        }
-        throw lastErr
+        )
+        if (!retryResult.success || !retryResult.result) throw new Error(retryResult.error?.message || 'LLM request failed')
+        return retryResult.result
       }
 
       // First request with tools
@@ -1427,6 +1784,7 @@ function setupIPC() {
           breaker.record(tc.function.name, isError)
           const resultQuality = computeResultQuality(tc.function.name, toolResult)
           recordToolCall(tc.function.name, !isError, isError ? toolResult.slice(0, 200) : undefined, resultQuality, toolExecTime)
+          // Error already tracked by recordToolCall above
           const correctedResult = wrapToolResult(toolResult, tc.function.name)
           const displayOutput = toolResult.length > 500 ? toolResult.slice(0, 500) + '...' : toolResult
           notifyToolCall(mw, { id: tc.id, name: tc.function.name }, isError ? 'error' : 'done', displayOutput)
@@ -1454,6 +1812,37 @@ function setupIPC() {
           if (convId) msgAdd(convId, 'tool', tr.result.slice(0, 30000), 0, undefined, undefined, tr.tcId)
         }
 
+        // Auto-cleanup: delete temporary script files created and executed in this batch
+        try {
+          const writtenPaths = new Set<string>()
+          const executedPaths = new Set<string>()
+          for (const tc of result.toolCalls) {
+            if (tc.function.name === 'ac_write_file' || tc.function.name === 'write_file') {
+              try { const a = JSON.parse(tc.function.arguments || '{}'); if (a.path) writtenPaths.add(a.path.replace(/\\/g, '/')) } catch {}
+            }
+            if (tc.function.name === 'ac_terminal') {
+              try {
+                const a = JSON.parse(tc.function.arguments || '{}')
+                const cmd = (a.command || a.cmd || '').replace(/\\/g, '/')
+                for (const wp of writtenPaths) { if (cmd.includes(wp.split('/').pop()!)) executedPaths.add(wp) }
+              } catch {}
+            }
+          }
+          for (const p of executedPaths) {
+            try {
+              const ext = p.split('.').pop()?.toLowerCase()
+              if (['ps1', 'py', 'sh', 'bat', 'cmd', 'js'].includes(ext || '')) {
+                const { unlinkSync } = require('fs')
+                unlinkSync(p)
+                console.log('[Cleanup] Deleted temp script:', p)
+                // Also remove from generated_files tracking
+                const id = 'gf-' + Buffer.from(p).toString('base64url').slice(0, 16)
+                kvDelete('generated_files', id)
+              }
+            } catch {}
+          }
+        } catch {}
+
         // Contradiction detection — warn about inconsistent tool results
         if (toolResults.length >= 2) {
           const contradictions = detectContradictions(toolResults.map(tr => ({
@@ -1471,6 +1860,13 @@ function setupIPC() {
           toolMsgs.push({ role: 'system', content: '[Verification] Please verify: 1) Do the tool results actually address the user\'s original request? 2) Are there any inconsistencies or missing information? 3) Should any steps be retried with different parameters?' })
         }
 
+        // CRITICAL: When ALL tools failed, force LLM to try alternatives
+        const allFailed = toolResults.every(tr => tr.result.includes('[ERROR]') || (tr.result.startsWith('{') && /"error"\s*:/.test(tr.result)))
+        if (allFailed && toolResults.length > 0) {
+          const failedNames = toolResults.map(tr => result.toolCalls.find((tc: any) => tc.id === tr.tcId)?.function.name || 'unknown').join(', ')
+          toolMsgs.push({ role: 'system', content: `[RECOVERY REQUIRED] All tools failed: ${failedNames}. You MUST immediately call a DIFFERENT tool to accomplish the user's request. Do NOT just describe the error. Try: code_execute for commands, ac_read_url for web content, ac_baike for knowledge, or ask the user for clarification. CALL A TOOL NOW.` })
+        }
+
         // Growth: detect repeated tool patterns and auto-generate skills
         const toolNames = result.toolCalls.map((tc: any) => tc.function.name)
         const patternResult = detectRepeatedPattern(toolNames, message)
@@ -1479,7 +1875,6 @@ function setupIPC() {
           // Auto-register the generated skill
           if (patternResult.autoSkill) {
             try {
-              const { kvUpsert } = require('./storage/db')
               kvUpsert('skills', patternResult.autoSkill.id, patternResult.autoSkill)
               console.log('[Growth] Auto-created skill:', patternResult.autoSkill.id)
             } catch (e) { console.warn('[Growth] Failed to auto-create skill:', (e as Error).message) }
@@ -1522,12 +1917,30 @@ function setupIPC() {
         collectedThinking += followUp.thinking
         if (followUp.full) lastText = followUp.full
 
+        // Auto-retry: if all tools failed and LLM didn't call new tools, force another attempt
+        if (followUp.toolCalls.length === 0 && allFailed) {
+          console.log('[Chat] All tools failed, LLM responded with text only. Forcing retry with different tools...')
+          const retryMsgs = [...followUpMsgs, { role: 'assistant', content: followUp.full || '' }, { role: 'system', content: '[AUTO-RETRY] The previous approach failed. You MUST try a completely different tool NOW. Do NOT explain the error. Do NOT ask the user. Just call a different tool immediately. For example: if terminal failed, use code_execute; if web_search failed, use read_url; if read_file failed, use terminal with ls/dir command.' }]
+          try {
+            const retryResult = await doStreamChatWithRetry(retryMsgs, gatewayMode ? undefined : useTools, { temperature: dynamicTemp })
+            if (retryResult.toolCalls.length > 0) {
+              console.log('[Chat] Auto-retry succeeded, got', retryResult.toolCalls.length, 'new tool calls')
+              collectedThinking += retryResult.thinking
+              if (retryResult.full) lastText = retryResult.full
+              // Process the retry tool calls through the chain loop
+              followUp = retryResult
+            }
+          } catch (retryErr) {
+            console.warn('[Chat] Auto-retry failed:', (retryErr as Error).message)
+          }
+        }
+
 
         // Handle chained tool calls (model calls tools again)
         let chainDepth = 0
         let currentMsgs = followUpMsgs
         let currentResult = followUp
-        while (currentResult.toolCalls.length > 0 && chainDepth < 5) {
+        while (currentResult.toolCalls.length > 0 && chainDepth < 10) {
           chainDepth++
           // Repair pipeline for chained calls
           const { calls: chainRepaired, report: chainReport } = repairer.process(currentResult.toolCalls)
@@ -1556,9 +1969,11 @@ function setupIPC() {
             notifyToolCall(mw, { id: tc.id, name: tc.function.name }, 'running')
             // Route MCP tools to MCP client, built-in tools to executeTool
             const mcpSid = mcpToolMap.get(tc.function.name)
+            const chainToolStart = Date.now()
             let toolResult = mcpSid
               ? await callMcpTool(mcpSid, tc.function.name, parsedArgs)
               : await executeTool(tc.function.name, parsedArgs)
+            const chainToolExecTime = Date.now() - chainToolStart
             let isError = toolResult.includes('[ERROR]') || (toolResult.startsWith('{') && /"error"\s*:/.test(toolResult))
             // Intelligent retry in chain loop
             if (isError) {
@@ -1611,7 +2026,8 @@ function setupIPC() {
             }
             breaker.record(tc.function.name, isError)
             const chainQuality = computeResultQuality(tc.function.name, toolResult)
-            recordToolCall(tc.function.name, !isError, isError ? toolResult.slice(0, 200) : undefined, chainQuality)
+            recordToolCall(tc.function.name, !isError, isError ? toolResult.slice(0, 200) : undefined, chainQuality, chainToolExecTime)
+            // Error already tracked by recordToolCall above
             const correctedResult = wrapToolResult(toolResult, tc.function.name)
             const chainOutput = toolResult.length > 500 ? toolResult.slice(0, 500) + '...' : toolResult
             notifyToolCall(mw, { id: tc.id, name: tc.function.name }, isError ? 'error' : 'done', chainOutput)
@@ -1627,6 +2043,35 @@ function setupIPC() {
             chainToolMsgs.push(cr.msg)
             if (convId) msgAdd(convId, 'tool', cr.result.slice(0, 30000), 0, undefined, undefined, cr.tcId)
           }
+
+          // Auto-cleanup temp scripts in chain
+          try {
+            const chainWritten = new Set<string>()
+            const chainExecuted = new Set<string>()
+            for (const tc of currentResult.toolCalls) {
+              if (tc.function.name === 'ac_write_file' || tc.function.name === 'write_file') {
+                try { const a = JSON.parse(tc.function.arguments || '{}'); if (a.path) chainWritten.add(a.path.replace(/\\/g, '/')) } catch {}
+              }
+              if (tc.function.name === 'ac_terminal') {
+                try {
+                  const a = JSON.parse(tc.function.arguments || '{}')
+                  const cmd = (a.command || a.cmd || '').replace(/\\/g, '/')
+                  for (const wp of chainWritten) { if (cmd.includes(wp.split('/').pop()!)) chainExecuted.add(wp) }
+                } catch {}
+              }
+            }
+            for (const p of chainExecuted) {
+              try {
+                const ext = p.split('.').pop()?.toLowerCase()
+                if (['ps1', 'py', 'sh', 'bat', 'cmd', 'js'].includes(ext || '')) {
+                  require('fs').unlinkSync(p)
+                  console.log('[Cleanup] Deleted temp script:', p)
+                  const id = 'gf-' + Buffer.from(p).toString('base64url').slice(0, 16)
+                  kvDelete('generated_files', id)
+                }
+              } catch {}
+            }
+          } catch {}
           // Growth: detect repeated patterns in chain and auto-generate skills
           const chainToolNames = currentResult.toolCalls.map((tc: any) => tc.function.name)
           const chainPatternResult = detectRepeatedPattern(chainToolNames, message)
@@ -1634,7 +2079,6 @@ function setupIPC() {
             chainToolMsgs.push({ role: 'system', content: `[Growth] ${chainPatternResult.message}` })
             if (chainPatternResult.autoSkill) {
               try {
-                const { kvUpsert } = require('./storage/db')
                 kvUpsert('skills', chainPatternResult.autoSkill.id, chainPatternResult.autoSkill)
               } catch {}
             }
@@ -1679,8 +2123,54 @@ function setupIPC() {
 
       // DEBUG: step marker
       try { require('fs').appendFileSync(require('path').join(require('os').tmpdir(), 'aaronclaw-step.log'), `[${new Date().toISOString()}] STEP3: returning ok=true finalLen=${(finalText||'').length}\n`) } catch {}
+      // Goal+Judge: verify task completion before ending
+      let finalOutput = finalText
+      if (finalText && collectedToolCalls.length > 0) {
+        const responseLower = finalText.toLowerCase()
+        const isIncomplete = finalText.length < 100 && !responseLower.includes('完成') && !responseLower.includes('done') && !responseLower.includes('已')
+          && !responseLower.includes('以下是') && !responseLower.includes('总结') && !responseLower.includes('综上')
+        if (isIncomplete) {
+          console.log('[GoalJudge] Response seems incomplete, requesting completion...')
+          try {
+            const goalPrompt = `The user asked: "${message}"\nYour response was: "${finalText.slice(0, 200)}"\n\nWas the user's request fully addressed? If not, continue and complete the task. If yes, just say "任务已完成".`
+            const port = getOpenClawPort()
+            const providers3 = cacheProviders()
+            const prov3 = providers3.find((p: any) => p.apiKey && p.enabled !== false)
+            let apiBase3 = `http://127.0.0.1:${port}/v1/chat/completions`
+            let apiKey3 = ''
+            if (prov3?.apiKey) { apiBase3 = (prov3.baseUrl || '').replace(/\/+$/, '') + '/chat/completions'; apiKey3 = prov3.apiKey }
+            const goalResp = await fetch(apiBase3, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json', ...(apiKey3 ? { 'Authorization': `Bearer ${apiKey3}` } : {}) },
+              body: JSON.stringify({ model: modelName, messages: [{ role: 'user', content: goalPrompt }], stream: false, max_tokens: 500 }),
+              signal: AbortSignal.timeout(15000),
+            })
+            const goalData = await goalResp.json()
+            const goalResult = goalData.choices?.[0]?.message?.content || ''
+            if (goalResult && !goalResult.includes('任务已完成') && goalResult.length > 50) {
+              finalOutput = finalText + '\n\n' + goalResult
+              console.log('[GoalJudge] Added completion text')
+            }
+          } catch (e) {
+            console.warn('[GoalJudge] Failed:', (e as Error).message)
+          }
+        }
+      }
+
       // Send complete message data to frontend
-      mw?.webContents.send('chat:done', finalText, collectedThinking || '', collectedToolCalls)
+      mw?.webContents.send('chat:done', finalOutput, collectedThinking || '', collectedToolCalls)
+
+      // Send desktop notification for completed response
+      try {
+        const cfg = loadConfig()
+        if (cfg.notifications?.desktop !== false && finalText) {
+          const { Notification } = require('electron')
+          if (Notification.isSupported()) {
+            const preview = finalText.slice(0, 100).replace(/\n/g, ' ')
+            new Notification({ title: 'AaronClaw', body: preview + (finalText.length > 100 ? '...' : '') }).show()
+          }
+        }
+      } catch {}
 
       // P2-1: Auto-generate experience card from completed task
       try {
@@ -1776,6 +2266,42 @@ function setupIPC() {
     }
   })
   ipcMain.handle('chat:cancel', () => { abortCtrl?.abort(); killAllProcesses(); return true })
+  ipcMain.handle('ollama:status', async () => {
+    try {
+      const r = await fetch('http://localhost:11434/api/tags', { signal: AbortSignal.timeout(2000) })
+      const data = await r.json()
+      return { running: true, models: (data.models || []).map((m: any) => m.name) }
+    } catch { return { running: false, models: [] } }
+  })
+  ipcMain.handle('chat:compare', async (_, { message, modelIds }: { message: string; modelIds: string[] }) => {
+    const config = kvGet('config', 'main') || {}
+    const providers = cacheProviders()
+    const results: any[] = []
+    for (const modelId of modelIds) {
+      const prov = providers.find((p: any) => p.apiKey && p.enabled !== false)
+      let apiBase = `http://127.0.0.1:${getOpenClawPort()}/v1/chat/completions`
+      let apiKey = ''
+      let modelName = modelId
+      if (prov?.apiKey) {
+        apiBase = (prov.baseUrl || '').replace(/\/+$/, '') + '/chat/completions'
+        apiKey = prov.apiKey
+      }
+      try {
+        const resp = await fetch(apiBase, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', ...(apiKey ? { 'Authorization': `Bearer ${apiKey}` } : {}) },
+          body: JSON.stringify({ model: modelName, messages: [{ role: 'user', content: message }], stream: false, max_tokens: 4096, temperature: 0.7 }),
+          signal: AbortSignal.timeout(60000),
+        })
+        const data = await resp.json()
+        const text = data.choices?.[0]?.message?.content || ''
+        results.push({ model: modelId, text, ok: resp.ok })
+      } catch (e: any) {
+        results.push({ model: modelId, text: '', ok: false, error: e?.message })
+      }
+    }
+    return { ok: true, results }
+  })
 
   // P2-5: Response quality feedback — track regenerate/fork signals
   ipcMain.handle('chat:feedback', (_, { type, convId }: { type: 'regenerate' | 'fork' | 'good'; convId?: string }) => {
@@ -1973,12 +2499,22 @@ Provide a unified, well-structured response.`
       const filename = filePath.split(/[\\/]/).pop() || filePath
       const chunkCount = Math.max(1, Math.ceil(content.length / 500))
       kvUpsert('rag', id, { id, filename, path: filePath, content, chunkCount, createdAt: new Date().toISOString() })
+      ragFtsUpsert(id, content)
       return { ok: true, id }
     } catch (e) { return errorResult(e) }
   })
   ipcMain.handle('rag:list', () => kvList('rag'))
-  ipcMain.handle('rag:delete', (_, id) => { kvDelete('rag', id) })
+  ipcMain.handle('rag:delete', (_, id) => { kvDelete('rag', id); ragFtsDelete(id) })
   ipcMain.handle('rag:search', (_, query, topK?) => {
+    const limit = topK || 5
+    try {
+      const ftsQuery = query.toLowerCase().split(/\s+/).filter((w: string) => w.length > 1).map((w: string) => `"${w}"`).join(' OR ')
+      const results = ragFtsSearch(ftsQuery, limit)
+      if (results.length > 0) {
+        return results.map((r: any) => ({ text: r.chunk_text, score: 1 - r.rank * 0.1, docId: r.doc_id }))
+      }
+    } catch {}
+    // Fallback to JS search
     const items: any[] = kvList('rag')
     const q = query.toLowerCase()
     const qWords = q.split(/\s+/).filter((w: string) => w.length > 1)
@@ -2110,14 +2646,6 @@ Provide a unified, well-structured response.`
     } catch (e) { return errorResult(e) }
   })
 
-  // Cron history
-  ipcMain.handle('cron:history', () => kvList('cron_history').slice(-50))
-
-  // Prompts
-  ipcMain.handle('prompts:list', () => kvList('prompts'))
-  ipcMain.handle('prompts:save', (_, p) => { kvUpsert('prompts', p.id, p) })
-  ipcMain.handle('prompts:delete', (_, id) => { kvDelete('prompts', id) })
-
   // Logs
   ipcMain.handle('logs:list', () => {
     try {
@@ -2135,161 +2663,30 @@ Provide a unified, well-structured response.`
   })
   ipcMain.handle('logs:dir', () => join(app.getPath('userData'), 'logs'))
 
-  // Gateway circuit breaker
-  ipcMain.handle('gateway:circuit', () => {
-    const port = getOpenClawPort()
-    return fetch(`http://127.0.0.1:${port}/health`, { signal: AbortSignal.timeout(3000) })
-      .then(() => ({ state: 'closed', failures: 0 }))
-      .catch(() => ({ state: 'open', failures: 1 }))
-  })
-
   // Search messages
   ipcMain.handle('search:messages', (_, query, limit?) => searchMessages(query, limit || 20))
 
-  // Conv fork
-  ipcMain.handle('conv:fork', (_, convId, idx?) => {
-    const msgs = msgList(convId)
-    const newId = randomUUID()
-    const now = new Date().toISOString()
-    const srcConv = kvGet('conversations', convId)
-    kvUpsert('conversations', newId, { id: newId, title: (srcConv?.title || 'Fork') + ' (fork)', model: srcConv?.model, createdAt: now, updatedAt: now })
-    const forkMsgs = typeof idx === 'number' ? msgs.slice(0, idx + 1) : msgs
-    if (forkMsgs.length > 0) {
-      const stmt = getDB().prepare('INSERT INTO messages (id, conv_id, role, content, tokens) VALUES (?, ?, ?, ?, ?)')
-      transaction(() => {
-        for (const m of forkMsgs) {
-          const msgId = 'msg-' + Date.now() + '-' + randomUUID().slice(0, 8)
-          stmt.run(msgId, newId, (m as any).role, (m as any).content, (m as any).tokens || 0)
-        }
-      })
-    }
-    return newId
-  })
+   // Conv fork
+   ipcMain.handle('conv:fork', (_, convId, idx?) => {
+     const msgs = msgList(convId)
+     const newId = randomUUID()
+     const now = new Date().toISOString()
+     const srcConv = kvGet('conversations', convId)
+     kvUpsert('conversations', newId, { id: newId, title: (srcConv?.title || 'Fork') + ' (fork)', model: srcConv?.model, createdAt: now, updatedAt: now })
+     const forkMsgs = typeof idx === 'number' ? msgs.slice(0, idx + 1) : msgs
+     if (forkMsgs.length > 0) {
+       const stmt = getDB().prepare('INSERT INTO messages (id, conv_id, role, content, tokens, tool_calls, thinking, tool_call_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
+       transaction(() => {
+         for (const m of forkMsgs) {
+           const msgId = 'msg-' + Date.now() + '-' + randomUUID().slice(0, 8)
+           stmt.run(msgId, newId, (m as any).role, (m as any).content, (m as any).tokens || 0, (m as any).tool_calls || null, (m as any).thinking || null, (m as any).tool_call_id || null)
+         }
+       })
+     }
+     return newId
+   })
 
   // Capabilities
-  ipcMain.handle('cap:tts', async (_, text, voice?) => {
-    const port = getOpenClawPort()
-    try {
-      const resp = await fetch(`http://127.0.0.1:${port}/v1/audio/speech`, {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ model: 'tts-1', input: text, voice: voice || 'alloy', response_format: 'mp3' }),
-        signal: AbortSignal.timeout(30000)
-      })
-      if (!resp.ok) return { ok: false, error: await resp.text() }
-      const buf = Buffer.from(await resp.arrayBuffer())
-      const audioPath = join(getDataDir(), 'tts-' + Date.now() + '.mp3')
-      writeFileSync(audioPath, buf)
-      return { ok: true, path: audioPath }
-    } catch (e) { return errorResult(e) }
-  })
-  ipcMain.handle('cap:imageGen', async (_, prompt, size?) => {
-    const port = getOpenClawPort()
-    try {
-      const resp = await fetch(`http://127.0.0.1:${port}/v1/images/generations`, {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ model: 'dall-e-3', prompt, n: 1, size: size || '1024x1024', response_format: 'url' }),
-        signal: AbortSignal.timeout(60000)
-      })
-      const data = await resp.json()
-      return { ok: true, url: data.data?.[0]?.url, revised_prompt: data.data?.[0]?.revised_prompt }
-    } catch (e) { return errorResult(e) }
-  })
-  ipcMain.handle('cap:transcribe', async (_, audioPath) => {
-    const port = getOpenClawPort()
-    try {
-      const audioBuf = readFileSync(audioPath)
-      const blob = new Blob([audioBuf], { type: 'audio/mp3' })
-      const form = new FormData()
-      form.append('file', blob, 'audio.mp3')
-      form.append('model', 'whisper-1')
-      const resp = await fetch(`http://127.0.0.1:${port}/v1/audio/transcriptions`, { method: 'POST', body: form, signal: AbortSignal.timeout(60000) })
-      const data = await resp.json()
-      return { ok: true, text: data.text }
-    } catch (e) { return errorResult(e) }
-  })
-  ipcMain.handle('cap:docExtract', async (_, filePath) => {
-    if (!isPathAllowed(filePath)) return { ok: false, error: 'Access denied: path outside allowed directories' }
-    try {
-      const content = readFileSync(filePath, 'utf8').slice(0, 50000)
-      return { ok: true, content, filename: filePath.split(/[\\/]/).pop() }
-    } catch (e) { return errorResult(e) }
-  })
-  ipcMain.handle('cap:webSearch', async (_, query) => {
-    try {
-      const resp = await fetch(`https://www.baidu.com/s?wd=${encodeURIComponent(query)}&rn=5`, {
-        headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36' },
-        signal: AbortSignal.timeout(10000)
-      })
-      const html = await resp.text()
-      const results: string[] = []
-      const re = /<h3[^>]*class="t"[^>]*>[\s\S]*?<a[^>]*href="([^"]+)"[^>]*>([\s\S]*?)<\/a>[\s\S]*?<\/h3>/gi
-      let m
-      while ((m = re.exec(html)) !== null && results.length < 5) {
-        const title = m[2].replace(/<[^>]+>/g, '').trim()
-        if (title) results.push((results.length + 1) + '. ' + title + ' | ' + m[1])
-      }
-      if (results.length === 0) return { ok: true, results: 'No results found for: ' + query }
-      return { ok: true, results: results.join(String.fromCharCode(10)) }
-    } catch (e) { return errorResult(e) }
-  })
-  ipcMain.handle('cap:embed', async (_, text) => {
-    const port = getOpenClawPort()
-    try {
-      const resp = await fetch(`http://127.0.0.1:${port}/v1/embeddings`, {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ model: 'text-embedding-3-small', input: text }),
-        signal: AbortSignal.timeout(15000)
-      })
-      const data = await resp.json()
-      return { ok: true, embedding: data.data?.[0]?.embedding }
-    } catch (e) { return errorResult(e) }
-  })
-    // Voice recording
-  const MAX_VOICE_SIZE = 50 * 1024 * 1024 // 50MB limit
-  let voiceChunks: Buffer[] = []
-  let voiceTotalSize = 0
-  ipcMain.handle('voice:start', () => { voiceChunks = []; voiceTotalSize = 0; return { ok: true } })
-  ipcMain.handle('voice:chunk', (_, base64Chunk: string) => {
-    const buf = Buffer.from(base64Chunk, 'base64')
-    voiceTotalSize += buf.length
-    if (voiceTotalSize > MAX_VOICE_SIZE) return { ok: false, error: 'Audio too large (>50MB)' }
-    voiceChunks.push(buf)
-    return { ok: true }
-  })
-  ipcMain.handle('voice:stop', async () => {
-    try {
-      const audioBuffer = Buffer.concat(voiceChunks)
-      const audioPath = join(getDataDir(), 'voice-' + Date.now() + '.webm')
-      writeFileSync(audioPath, audioBuffer)
-      // Transcribe via Gateway
-      const port = getOpenClawPort()
-      const blob = new Blob([audioBuffer], { type: 'audio/webm' })
-      const form = new FormData()
-      form.append('file', blob, 'audio.webm')
-      form.append('model', 'whisper-1')
-      const resp = await fetch('http://127.0.0.1:' + port + '/v1/audio/transcriptions', { method: 'POST', body: form, signal: AbortSignal.timeout(60000) })
-      const data = await resp.json()
-      voiceChunks = []
-      return { ok: true, text: data.text || '' }
-    } catch (e) { voiceChunks = []; return { ok: false, error: (e as Error).message } }
-  })
-
-  ipcMain.handle('cap:playAudio', (_, audioPath) => {
-    try {
-      // Clean old TTS files (older than 1 hour)
-      const dataDir = getDataDir()
-      const now = Date.now()
-      try {
-        for (const f of readdirSync(dataDir)) {
-          if (f.startsWith('tts-') && f.endsWith('.mp3')) {
-            const fp = join(dataDir, f)
-            if (now - statSync(fp).mtimeMs > 3600000) require('fs').unlinkSync(fp)
-          }
-        }
-      } catch {}
-      return { ok: true }
-    } catch (e) { return errorResult(e) }
-  })
 }
 
 // ======== Gateway Port Scan ========
@@ -2369,15 +2766,35 @@ app.whenReady().then(() => {
   warmupMirrors().catch(() => {})
   // 知识技能引擎初始化
   try { initSkillEngine() } catch {}
-  // MCP removed — caused timeouts in China
+  // Built-in MCP server (开箱即用，不需要外部 npm 包)
+  try { initInternalMcpServer() } catch (e) { console.error('[MCP] Internal server init failed:', e) }
+  // Auto-detect Ollama for local model support
+  fetch('http://localhost:11434/api/tags', { signal: AbortSignal.timeout(3000) })
+    .then(r => r.json())
+    .then(data => {
+      const ollamaModels = (data.models || []).map((m: any) => ({
+        id: 'ollama/' + m.name,
+        name: m.name + ' (本地)',
+        provider: 'ollama',
+        contextWindow: 32768,
+        maxTokens: 4096,
+        enabled: true,
+      }))
+      const existingProviders = kvList('providers')
+      if (!existingProviders.find((p: any) => p.id === 'ollama')) {
+        kvUpsert('providers', 'ollama', { id: 'ollama', name: 'Ollama (本地)', baseUrl: 'http://localhost:11434/v1', apiKey: '', models: ollamaModels, enabled: true })
+      }
+      for (const m of ollamaModels) {
+        const existing = kvList('models').find((x: any) => x.id === m.id)
+        if (!existing) kvUpsert('models', m.id, m)
+      }
+      console.log('[Ollama] Detected', ollamaModels.length, 'local models')
+    })
+    .catch(() => {})
 })
 
 app.on('before-quit', () => { tray?.destroy(); if (gatewayProcess) { gatewayProcess.kill(); gatewayProcess = null } })
 app.on('window-all-closed', () => { closeDB(); if (process.platform !== 'darwin') app.quit() })
-
-
-
-
 
 
 
