@@ -1,0 +1,11 @@
+import { f as ModelProviderConfig } from "../../types.models-O5iWV16x.js";
+import { Oc as ProviderThinkingProfile } from "../../types-C0dQmare.js";
+import { wt as ProviderDefaultThinkingPolicyContext } from "../../plugin-entry-BOAJmgcf.js";
+//#region extensions/google/provider-policy-api.d.ts
+declare function normalizeConfig(params: {
+  provider: string;
+  providerConfig: ModelProviderConfig;
+}): ModelProviderConfig;
+declare function resolveThinkingProfile(context: ProviderDefaultThinkingPolicyContext): ProviderThinkingProfile | undefined;
+//#endregion
+export { normalizeConfig, resolveThinkingProfile };

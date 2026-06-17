@@ -1,0 +1,31 @@
+node_modules/
+dist/
+dist-electron/
+release/
+_electron_bin/
+resources/node.exe
+# resources/openclaw/node_modules/  # 临时注释，打包需要
+*.db
+*.db-wal
+*.db-shm
+backups/
+logs/
+sandbox/
+crash.log
+.env
+*.log
+
+# Debug scripts (contain hardcoded local paths)
+_check.js
+_fix_bugs.js
+_scan_bugs.js
+_test_*.js
+test-*.mjs
+test-*.py
+MiClaw-Dev.bat
+start-dev.bat
+start.bat
+run_stock.bat
+
+# Internal docs (not for public)
+MIMO-OPENCLAW-ADAPTER-PLAN.md

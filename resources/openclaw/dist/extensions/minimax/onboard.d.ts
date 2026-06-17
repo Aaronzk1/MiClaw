@@ -1,0 +1,2 @@
+import { i as applyMinimaxApiProviderConfigCn, n as applyMinimaxApiConfigCn, r as applyMinimaxApiProviderConfig, t as applyMinimaxApiConfig } from "../../onboard-Bijc1wot.js";
+export { applyMinimaxApiConfig, applyMinimaxApiConfigCn, applyMinimaxApiProviderConfig, applyMinimaxApiProviderConfigCn };

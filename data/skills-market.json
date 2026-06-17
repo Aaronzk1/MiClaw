@@ -1,0 +1,62 @@
+[
+  {
+    "id": "market-stock-screener-pro",
+    "name": "高级选股器",
+    "description": "多维度条件选股，支持技术面+基本面+资金面组合筛选",
+    "category": "金融",
+    "author": "MiClaw",
+    "version": "1.0",
+    "skills": ["stock_quote", "stock_kline", "stock_finance", "stock_screener", "chart_generate"],
+    "execute": "python -c \"import akshare as ak; df = ak.stock_zh_a_spot_em(); print(df.head(10))\""
+  },
+  {
+    "id": "market-web-scraper",
+    "name": "网页抓取器",
+    "description": "智能网页抓取，自动提取正文内容，支持批量抓取",
+    "category": "工具",
+    "author": "MiClaw",
+    "version": "1.0",
+    "skills": ["read_url", "write_file"],
+    "execute": "echo \"Web scraper ready\""
+  },
+  {
+    "id": "market-translate-pro",
+    "name": "专业翻译",
+    "description": "支持中英日韩翻译，专业术语行业标准译法",
+    "category": "写作",
+    "author": "MiClaw",
+    "version": "1.0",
+    "skills": ["translate", "text_stats"],
+    "execute": "echo \"Translation ready\""
+  },
+  {
+    "id": "market-data-viz",
+    "name": "数据可视化",
+    "description": "自动生成图表、仪表盘、数据报告",
+    "category": "分析",
+    "author": "MiClaw",
+    "version": "1.0",
+    "skills": ["chart_generate", "data_analyze", "data_profile"],
+    "execute": "echo \"Data visualization ready\""
+  },
+  {
+    "id": "market-code-review",
+    "name": "代码审查专家",
+    "description": "自动审查代码质量、安全性、性能",
+    "category": "开发",
+    "author": "MiClaw",
+    "version": "1.0",
+    "skills": ["code_review", "project_scan", "code_execute"],
+    "execute": "echo \"Code review ready\""
+  },
+  {
+    "id": "market-news-digest",
+    "name": "新闻简报",
+    "description": "每日新闻摘要、行业动态追踪",
+    "category": "生活",
+    "author": "MiClaw",
+    "version": "1.0",
+    "skills": ["news_search", "daily_briefing", "hot_search"],
+    "execute": "echo \"News digest ready\""
+  }
+]

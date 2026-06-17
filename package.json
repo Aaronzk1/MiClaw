@@ -1,0 +1,131 @@
+{
+  "name": "aaronclaw",
+  "version": "3.0.0",
+  "description": "MiClaw — Universal AI Agent Desktop",
+  "main": "dist-electron/main.js",
+  "author": "MiClaw Team",
+  "license": "MIT",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "electron:dev": "vite build && electron .",
+    "electron:build": "vite build && electron-builder --win",
+    "electron:build:secure": "vite build && node scripts/bytenode-compile.mjs && electron-builder --win",
+    "rebuild": "electron-rebuild",
+    "postinstall": "cd resources/openclaw && npm install --omit=dev"
+  },
+  "build": {
+    "appId": "com.aaronclaw.desktop",
+    "productName": "MiClaw",
+    "directories": {
+      "output": "../MiClaw-Release"
+    },
+    "files": [
+      "dist-electron/**/*",
+      "dist/**/*",
+      "data/agents.json",
+      "data/skills-market.json",
+      "data/sample-plugins/**/*"
+    ],
+    "extraResources": [
+      {
+        "from": "resources/node.exe",
+        "to": "node.exe"
+      },
+      {
+        "from": "resources/openclaw",
+        "to": "openclaw",
+        "filter": [
+          "**/*",
+          "node_modules/**/*",
+          "dist/**/*",
+          "!src/**",
+          "!extensions/**",
+          "!.git/**",
+          "!apps/**",
+          "!docs/**",
+          "!ui/**",
+          "!scripts/**",
+          "!packages/**",
+          "!test/**",
+          "!qa/**",
+          "!.github/**",
+          "!.agents/**",
+          "!skills/**",
+          "!security/**",
+          "!config/**",
+          "!patches/**",
+          "!.vscode/**",
+          "!CHANGELOG.md",
+          "!CONTRIBUTING.md",
+          "!AGENTS.md",
+          "!CLAUDE.md",
+          "!Dockerfile",
+          "!docker-compose.yml",
+          "!appcast.xml",
+          "!.npmrc",
+          "!.pre-commit-config.yaml",
+          "!.semgrepignore",
+          "!.oxlintrc.json",
+          "!.oxfmtrc.jsonc",
+          "!.crabbox.yaml",
+          "!.dockerignore",
+          "!.env.example",
+          "!.gitattributes",
+          "!**/*.ts",
+          "!**/*.map"
+        ]
+      }
+    ],
+    "win": {
+      "target": [
+        "nsis"
+      ],
+      "icon": "public/logo.png"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "MiClaw"
+    }
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "better-sqlite3": "^12.10.0",
+    "docx": "^9.7.1",
+    "dompurify": "^3.2.0",
+    "highlight.js": "^11.11.1",
+    "pdf-parse": "^1.1.1",
+    "pdfkit": "^0.19.1",
+    "pptxgenjs": "^4.0.1",
+    "qrcode": "^1.5.4",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
+    "react-markdown": "^10.1.0",
+    "rehype-highlight": "^7.0.2",
+    "rehype-katex": "^7.0.1",
+    "remark-gfm": "^4.0.1",
+    "remark-math": "^6.0.0",
+    "xlsx": "^0.18.5",
+    "zustand": "^5.0.0"
+  },
+  "devDependencies": {
+    "@electron/rebuild": "^4.0.0",
+    "@tailwindcss/vite": "^4.0.0",
+    "@types/better-sqlite3": "^7.6.0",
+    "@types/node": "^22.0.0",
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0",
+    "@vitejs/plugin-react": "^4.3.0",
+    "electron": "^35.0.0",
+    "electron-builder": "^26.15.2",
+    "esbuild": "^0.28.0",
+    "tailwindcss": "^4.0.0",
+    "typescript": "^5.7.0",
+    "vite": "^6.4.3",
+    "vite-plugin-electron": "^0.28.0",
+    "vite-plugin-electron-renderer": "^0.14.0"
+  }
+}

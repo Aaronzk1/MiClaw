@@ -1,0 +1,42 @@
+import { f as clampTimerTimeoutMs, j as resolveTimerTimeoutMs } from "./number-coercion-CJQ8TR--.js";
+import { f as parseConfiguredModelVisibilityEntries } from "./model-selection-shared-b32cUYts.js";
+const modelCatalogBrowseDeps = {
+	setTimeout: globalThis.setTimeout,
+	clearTimeout: globalThis.clearTimeout
+};
+function resolveModelCatalogBrowseTimeoutMs(value) {
+	return clampTimerTimeoutMs(value, 1) ?? resolveTimerTimeoutMs(750, 1);
+}
+/** True when a browse view cannot be answered from read-only cached catalog entries. */
+function modelCatalogBrowseRequiresFullDiscovery(params) {
+	return (params.view ?? "default") === "all" || parseConfiguredModelVisibilityEntries({ cfg: params.cfg }).providerWildcards.size > 0;
+}
+/** Loads catalog entries for browse views, using read-only discovery unless full catalog is required. */
+async function loadModelCatalogForBrowse(params) {
+	const view = params.view ?? "default";
+	if (modelCatalogBrowseRequiresFullDiscovery({
+		cfg: params.cfg,
+		view
+	})) return await params.loadCatalog({ readOnly: false });
+	let timeout;
+	const timeoutMs = resolveModelCatalogBrowseTimeoutMs(params.timeoutMs);
+	const timedOut = Symbol("model-catalog-browse-timeout");
+	const catalogPromise = params.loadCatalog({ readOnly: true });
+	const timeoutPromise = new Promise((resolve) => {
+		timeout = modelCatalogBrowseDeps.setTimeout(() => resolve(timedOut), timeoutMs);
+		timeout.unref?.();
+	});
+	try {
+		const result = await Promise.race([catalogPromise, timeoutPromise]);
+		if (result === timedOut) {
+			catalogPromise.catch(() => void 0);
+			params.onTimeout?.(timeoutMs);
+			return [];
+		}
+		return result;
+	} finally {
+		if (timeout) modelCatalogBrowseDeps.clearTimeout(timeout);
+	}
+}
+//#endregion
+export { modelCatalogBrowseRequiresFullDiscovery as n, loadModelCatalogForBrowse as t };

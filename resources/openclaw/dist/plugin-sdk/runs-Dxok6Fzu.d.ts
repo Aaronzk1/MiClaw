@@ -1,0 +1,70 @@
+import { a as SourceReplyDeliveryMode } from "./types-BYvUZFDr.js";
+
+//#region src/agents/embedded-agent-runner/run-state.d.ts
+/**
+ * Shared process state for embedded-agent runs, queues, snapshots, and model-switch requests.
+ *
+ * The maps are global-singleton backed so reloads and lazy imports inside the same gateway process
+ * do not split active-run bookkeeping.
+ */
+type EmbeddedAgentQueueHandle = {
+  kind?: "embedded";
+  queueMessage: (text: string, options?: EmbeddedAgentQueueMessageOptions) => Promise<void>;
+  isStreaming: () => boolean;
+  isCompacting: () => boolean;
+  supportsTranscriptCommitWait?: boolean;
+  cancel?: (reason?: "user_abort" | "restart" | "superseded") => void;
+  abort: () => void;
+  sourceReplyDeliveryMode?: SourceReplyDeliveryMode;
+};
+type EmbeddedAgentQueueMessageOptions = {
+  steeringMode?: "all";
+  debounceMs?: number;
+  deliveryTimeoutMs?: number;
+  waitForTranscriptCommit?: boolean;
+  sourceReplyDeliveryMode?: SourceReplyDeliveryMode;
+};
+//#endregion
+//#region src/agents/embedded-agent-runner/runs.d.ts
+type EmbeddedAgentQueueFailureReason = "no_active_run" | "not_streaming" | "compacting" | "source_reply_delivery_mode_mismatch" | "transcript_commit_wait_unsupported" | "runtime_rejected";
+type EmbeddedAgentQueueMessageOutcome = {
+  queued: true;
+  sessionId: string;
+  target: "embedded_run" | "reply_run";
+  gatewayHealth: "live";
+  deliveredAtMs?: number;
+  enqueuedAtMs?: number;
+} | {
+  queued: false;
+  sessionId: string;
+  reason: EmbeddedAgentQueueFailureReason;
+  gatewayHealth: "live";
+  errorMessage?: string;
+};
+/**
+ * Abort embedded OpenClaw runs.
+ *
+ * - With a sessionId, aborts that single run.
+ * - With no sessionId, supports targeted abort modes (for example, compacting runs only).
+ */
+declare function abortEmbeddedAgentRun(sessionId: string): boolean;
+declare function abortEmbeddedAgentRun(sessionId: undefined, opts: {
+  mode: "all" | "compacting";
+}): boolean;
+declare function resolveActiveEmbeddedRunSessionId(sessionKey: string): string | undefined;
+type AbortAndDrainEmbeddedAgentRunResult = {
+  aborted: boolean;
+  drained: boolean;
+  forceCleared: boolean;
+};
+declare function abortAndDrainEmbeddedAgentRun(params: {
+  sessionId: string;
+  sessionKey?: string;
+  settleMs?: number;
+  forceClear?: boolean;
+  reason?: string;
+}): Promise<AbortAndDrainEmbeddedAgentRunResult>;
+declare function setActiveEmbeddedRun(sessionId: string, handle: EmbeddedAgentQueueHandle, sessionKey?: string, sessionFile?: string): void;
+declare function clearActiveEmbeddedRun(sessionId: string, handle: EmbeddedAgentQueueHandle, sessionKey?: string, sessionFile?: string): void;
+//#endregion
+export { clearActiveEmbeddedRun as a, EmbeddedAgentQueueMessageOptions as c, abortEmbeddedAgentRun as i, EmbeddedAgentQueueMessageOutcome as n, resolveActiveEmbeddedRunSessionId as o, abortAndDrainEmbeddedAgentRun as r, setActiveEmbeddedRun as s, AbortAndDrainEmbeddedAgentRunResult as t };

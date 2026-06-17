@@ -1,0 +1,3 @@
+import { Gr as DispatchReplyWithBufferedBlockDispatcher, Kr as DispatchReplyWithDispatcher } from "./types-C0dQmare.js";
+import { n as dispatchReplyWithDispatcher, t as dispatchReplyWithBufferedBlockDispatcher } from "./provider-dispatcher-BoK7Ftq5.js";
+export { type DispatchReplyWithBufferedBlockDispatcher, type DispatchReplyWithDispatcher, dispatchReplyWithBufferedBlockDispatcher, dispatchReplyWithDispatcher };

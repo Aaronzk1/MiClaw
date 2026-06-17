@@ -1,0 +1,49 @@
+{
+  "stock-quote": {
+    "description": "获取A股实时行情数据（腾讯API），包括股价、涨跌幅、成交量",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "code": {
+          "type": "string",
+          "description": "股票代码，如 600519、002050"
+        }
+      },
+      "required": ["code"]
+    },
+    "handler": "scripts/stock-api.js:quote"
+  },
+  "stock-finance": {
+    "description": "获取股票财务数据（东财API），包括营收、净利润、ROE",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "code": {
+          "type": "string",
+          "description": "股票代码"
+        }
+      },
+      "required": ["code"]
+    },
+    "handler": "scripts/stock-api.js:finance"
+  },
+  "stock-kline": {
+    "description": "获取股票K线数据（腾讯API），支持日K、周K、月K",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "code": {
+          "type": "string",
+          "description": "股票代码"
+        },
+        "period": {
+          "type": "string",
+          "enum": ["daily", "weekly", "monthly"],
+          "description": "K线周期"
+        }
+      },
+      "required": ["code"]
+    },
+    "handler": "scripts/stock-api.js:kline"
+  }
+}

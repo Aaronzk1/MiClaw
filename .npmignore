@@ -1,0 +1,13 @@
+# Source code (only dist/ should be published)
+src/
+electron/
+*.ts
+*.tsx
+tsconfig*.json
+vite.config.*
+.gitignore
+data/sample-plugins/
+data/test*
+data/debug*
+data/stress_test*
+release/

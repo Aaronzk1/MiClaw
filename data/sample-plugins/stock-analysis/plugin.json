@@ -1,0 +1,8 @@
+{
+  "id": "stock-analysis",
+  "name": "股票分析",
+  "version": "1.0.0",
+  "description": "A股股票分析工具，支持实时行情、财务数据、K线图",
+  "author": "MiClaw",
+  "enabled": true
+}

@@ -1,0 +1,2 @@
+import { i as reloadChannelSetupPluginRegistryForChannel, n as loadChannelSetupPluginRegistrySnapshotForChannel, r as reloadChannelSetupPluginRegistry, t as ensureChannelSetupPluginInstalled } from "./plugin-install-Z43r2oV7.js";
+export { ensureChannelSetupPluginInstalled, loadChannelSetupPluginRegistrySnapshotForChannel, reloadChannelSetupPluginRegistry, reloadChannelSetupPluginRegistryForChannel };
