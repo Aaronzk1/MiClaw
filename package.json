@@ -4,7 +4,7 @@
   "description": "MiClaw — Universal AI Agent Desktop",
   "main": "dist-electron/main.js",
   "author": "MiClaw Team",
-  "license": "UNLICENSED",
+  "license": "MIT",
   "scripts": {
     "dev": "vite",
     "build": "vite build",
@@ -37,6 +37,8 @@
         "to": "openclaw",
         "filter": [
           "**/*",
+          "node_modules/**/*",
+          "dist/**/*",
           "!src/**",
           "!extensions/**",
           "!.git/**",
